@@ -1,0 +1,315 @@
+# Changelog
+
+All notable changes to xoluman are recorded here.
+
+## [0.6.4] — 2026-08-03
+
+- **T-15 (partial)** — REF field navigation and listbox/select fields,
+  from an explicit difficulty assessment. Neither needs a new xolu API.
+- `internal/fieldmeta`: listbox/select field configuration stored as
+  `xoluman_field_meta` entity documents — schema-less, the same
+  established pattern as T-09's blob folders, not a new xolu primitive.
+  Static option lists and ref-sourced ones (options looked up from
+  another entity's own options-shaped field) both supported.
+- `formengine.RenderFields` refactored from four positional arguments to
+  a `RenderOptions` struct (`Values`/`Errors`/`ReadOnly`/`FieldOptions`/
+  `RefLinks`) — it needed two more capabilities and four positional
+  params was already the practical limit. Only one real call site
+  existed, so low risk; every entity form handler (`NewForm`, `Create`,
+  `EditForm`, `Update`) updated. Select rendering takes priority over
+  type-based dispatch (a boolean field with configured options renders
+  as a dropdown, not a checkbox); required fields skip the empty
+  leading choice.
+- `internal/ui/refs.go`: `resolveFormOptions` builds ref navigation
+  links from `EntitySchema.Refs` (confirmed this already gives the
+  target entity type directly, no guessing needed) for any *set* ref
+  field, with a name/title/label heuristic for the link text — falling
+  back to `type #id` even when the fetch itself fails, so a broken
+  reference stays visible and clickable rather than vanishing.
+- A real bug caught in my own test, not the implementation: assumed
+  minty would render `selected` after `value` in an `<option>` tag;
+  minty sorts attributes alphabetically, so it doesn't. Fixed to check
+  the whole tag rather than assume an order.
+- Coverage: 88.9% (fieldmeta), full suite green under `-race`.
+
+**Explicitly postponed, not started (T-15's tracking entry has the
+full detail):**
+1. Ref links in the entity *list* preview — cheap, just not wired in yet.
+2. The one-level side-panel hierarchy view — `resolveFormOptions`
+   already computes what it needs; needs a rendering pass.
+3. Grid editor's Tabulator `list`-editor integration for select fields
+   — config shape already verified against the real vendored source,
+   `buildGridColumns` doesn't consume `fieldmeta` yet.
+4. End-to-end verification against real xolu — everything above is
+   unit-tested only this pass, unlike T-05/T-10/T-11's grid API.
+5. Full nested inline *editing* of a linked document within the parent
+   form — assessed High difficulty, recommended against for v1 (real
+   complexity around nested form state and save semantics). Not
+   started, no plan to start without a separate design pass.
+
+## [0.6.3] — 2026-08-03
+
+- `internal/xoluext/fsmdef.go`: FSM definition write methods
+  (`CreateMachineDef`, `ReplaceMachineDef`, `DeleteMachineDef`,
+  `ValidateMachineDef`) — calling xolu's already-documented
+  `/api/v2/fsm/def` REST endpoints directly, since the official
+  `xolu/pkg/client` doesn't wrap them yet (requested, T-13,
+  `docs/xolu-requests-fsm-def.md`). Not a modification to xolu — this
+  is xoluman consuming xolu's own public API, entirely within
+  xoluman's own repository. Deletable in one shot once the official
+  client methods land.
+- 91.4% coverage, all four operations plus auth-header/tenant-URL
+  construction and both error-decoding paths (structured XOLU error
+  envelope and raw-body fallback) unit tested.
+- Verified end-to-end against a real running xolu binary — full
+  lifecycle (validate → create → get via the *official* client,
+  proving genuine round-trip through real storage → replace → delete
+  → confirmed gone). Caught three real things worth knowing, now
+  recorded in `docs/KNOWN_ISSUES.md`: xolu's `/api/v2` surface is
+  disabled unless the server sets `XOLU_API_V2_ENABLED=true` (404s
+  with plain "page not found," not an XOLU-coded error, otherwise);
+  guard expressions are T-SQL syntax (`=`, not `==`); `Determinism` is
+  required with exactly three valid values, and a transition's
+  `Output` must be pre-declared in `OutputAlphabet`.
+
+## [0.6.2] — 2026-08-03
+
+- `internal/modules.Module` gained `MountRoutes func(*http.ServeMux)`,
+  matching Seam AMS's actual module pattern — T-08 had only ported the
+  nav-registration piece; every route was still hand-wired centrally in
+  `internal/server/server.go`. `RegisterConnectionsModule`/
+  `RegisterEntitiesModule` now own their own route tables;
+  `server.New` shrinks to building the registry, calling `MountAll`,
+  and the two things that aren't modules (static asset serving, the
+  root redirect).
+- Real design constraint solved, not glossed over: the shared,
+  `init()`-populated registry `internal/ui` uses for nav rendering
+  can't also be used for route mounting — `server.New` is called once
+  per real process but dozens of times across the test suite, and
+  `http.ServeMux` panics on a duplicate pattern registration. Nav
+  registration stays `init()`-based (store-independent, safe to run
+  once); route mounting builds a fresh registry per `server.New` call.
+  Verified directly: the full suite (which calls `server.New` many
+  times) passes clean under `-race`, and a targeted 5-run repeat of the
+  connections→entities flow against real xolu binaries showed no panics
+  or duplicate-route errors.
+- No user-visible behaviour change — confirmed via the same real
+  end-to-end sequence already used to verify T-10 (create a connection,
+  browse its entities) against real running xolu/xoluman binaries.
+
+## [0.6.1] — 2026-08-03
+
+- T-08 closed: `internal/modules` — a self-registering module registry
+  (adapted from Seam AMS's own `internal/modules`, without Seam's
+  role-based `VisibleTo(role)` gating, which xoluman has no
+  multi-user/role model to need), replacing the hardcoded nav list in
+  `internal/ui/layout.go`. `Registry.Visible(predicate)` exists as the
+  hook a future visibility layer could use, unbuilt for now. Connections
+  registers itself via `init()` in `connections.go` — the pattern future
+  modules (graph editor, FSM editor) follow when they land. No
+  user-visible change yet with only one module registered; this is
+  infrastructure for when there's more than one, not a new capability.
+
+## [0.6.0] — 2026-08-03
+
+- **T-05 closed — entity import from CSV/JSON files.** Two-phase
+  upload → preview → confirm flow: `internal/importer` parses the
+  upload (rows independent — no native xolu bulk-import endpoint exists,
+  confirmed in T-05's own tracking, so one row's failure never affects
+  another's), a short-lived in-memory session (random ID, 30-minute
+  expiry, single-use, lazily swept — not a background goroutine) bridges
+  preview and confirm without re-uploading the file or stuffing
+  arbitrarily many rows into hidden form fields. Reuses T-07/T-05's own
+  `formengine.ParseFormValues` for CSV type coercion rather than
+  re-implementing it, since a CSV cell and a submitted form field are
+  the same shape once you're past reading the file.
+- **A real bug caught and fixed before shipping, not discovered by a
+  test written to match broken behaviour:** CSV boolean columns were
+  read via presence, not value — inherited from `ParseFormValues`'s
+  correct-for-HTML-checkboxes logic (a present form key means checked,
+  since browsers omit unchecked boxes from submissions entirely), which
+  is wrong for a file column that can legitimately be present with an
+  empty or literal `"false"` cell. Every boolean column would have
+  silently become `true` the moment it appeared in the import file at
+  all. Fixed with dedicated value-based CSV boolean parsing
+  (`true`/`1`/`yes`/`on` vs `false`/`0`/`no`/`off`/empty), not patched
+  by loosening the test.
+- Verified end-to-end against a real xolu instance: uploaded a real CSV
+  with a mix of valid, partially-empty, and invalid rows; confirmed only
+  the valid rows landed, with correct type coercion (integer, boolean)
+  and correct omission of an empty optional cell (not coerced to a
+  zero/false default).
+- 95.2%/96.3%/78.8% coverage (importer/server/ui), full suite green
+  under `-race`.
+
+## [0.5.0] — 2026-08-03
+
+- **T-10 closed — the entity browser (both halves now done).**
+  `internal/ui/entities.go`: entity type list, paginated entity list
+  with a bounded data preview (up to 4 non-object/array fields as
+  columns, long strings truncated — a generic browser across arbitrary
+  schemas needs a bound, full field access is the edit form's job),
+  create/edit forms wrapping T-07's `formengine.RenderFields`, delete
+  confirmation via the shared modal.
+- `internal/formengine.ParseFormValues`: the inverse of `RenderFields`
+  — submitted form values back to typed data per field, per-field
+  errors rather than an all-or-nothing failure, the checkbox
+  absent-means-false browser behaviour handled explicitly, decimal
+  fields kept as exact strings end to end (render to submit, never
+  round-tripped through float64).
+- Caught and fixed during testing, not assumed correct: the first pass
+  at the entity list table showed bare IDs only, no data — genuinely
+  useless for identifying which row is which without opening each one.
+  Fixed before considering this done, not shipped and revisited later.
+- Verified end-to-end against a real xolu instance: registered a real
+  schema, created real rows, browsed/edited/pre-populated them through
+  the actual running UI — not just the mocked test suite.
+- 95.8%/78.5% coverage (server/ui), full suite green under `-race`.
+
+So, concretely: xoluman can now genuinely browse and edit arbitrary
+entity data on a connected xolu instance, in a real browser. That's the
+milestone this whole T-06→T-07→T-10 chain was for.
+
+## [0.4.1] — 2026-08-03
+
+- **Correction:** T-01 (blob client methods) was implemented and closed
+  directly against Horacio's local xolu checkout — wrong. xoluman does
+  not modify xolu; changes to xolu are requests to the xolu team, not
+  code this project writes into someone else's repository, regardless
+  of what a `go.mod replace` directive makes locally buildable. Caught,
+  the code was discarded, and the mistake is recorded as a correction
+  note in `docs/RESOLVED.md` rather than rewritten out of history.
+  Recorded as a foundational decision in `docs/KNOWN_ISSUES.md`.
+- `docs/xolu-requests.md`: a plain-language request document to the
+  xolu team (T-13), covering everything xoluman actually needs from
+  xolu — reviewed comprehensively, not just the blob/export work
+  already in flight. Includes two findings from that review: a
+  documentation bug in `EXPORT_API.md` (wrong manifest field names,
+  a `graph_files` key that doesn't exist) and a functional gap in
+  already-shipped xoluman functionality (`Client.Health()` never
+  applies the configured auth header, so "Test connection" can't
+  actually validate a credential, only server reachability).
+- T-02, T-03 reframed as blocked on the xolu team's response (T-13)
+  rather than xoluman-implementable.
+
+## [0.4.0] — 2026-08-03
+
+- Blob primitive methods added to `xolu/pkg/client` (T-01, closed — see
+  `docs/RESOLVED.md`): `BlobPut`, `BlobGet`, `BlobHead`, `BlobDelete`,
+  `BlobList`, `BlobUsage`. Request/response shapes verified directly
+  against `pkg/server/blob_handlers.go`'s exact JSON tags, not just
+  `BLOB_API.md`'s prose (which omits `blobPutResponse`'s `size` field).
+  Full xolu `pkg/client` suite still green; whole-repo `go build`
+  confirmed no wider breakage. This is genuinely upstream xolu work,
+  done against the local checkpoint xoluman's `go.mod` replaces —
+  **not yet given a real xolu T-number or release**, since that
+  checkpoint (v0.24.3) predates T-141 known to exist upstream at
+  v0.24.4; assigning a number here risked colliding with whatever's
+  actually next in the live xolu register. Needs proper registration
+  and release cycling when reconciled with the real xolu working copy.
+
+## [0.3.0] — 2026-08-03
+
+- `internal/formengine`: the schema-driven generic form renderer (T-07,
+  closed — see `docs/RESOLVED.md`). Renders flat input rows from
+  `client.FieldDef` in schema order — text/email/url by format, number
+  with correct step for integer vs. number, decimal deliberately kept as
+  text (never `<input type="number">`, which coerces through float64 and
+  loses exactly the precision xolu's decimal type exists to preserve),
+  checkbox for boolean, datetime-local for date-time/timestamp, a JSON
+  textarea fallback for object/array (flat fields only — no nested
+  sub-forms), ref fields editable by target ID. Inline validation errors,
+  per-field read-only/disabled. Deliberately not Seam's formengine — no
+  tabs, no `x-seam-relation`, no visibility rules. 100% statement
+  coverage, no server required to test (same pattern as `connstore`).
+- Sorted the full open register by dependency order, then priority,
+  before starting this work — T-07 was the first ready item with no
+  unmet prerequisites.
+
+## [0.2.3] — 2026-08-03
+
+- Reversed course on styling: adopted Seam's actual Tailwind CSS build
+  (package.json/tailwind.config.js/scripts/tailwind.input.css mirroring
+  Seam's own setup exactly, `make css` / `npm run css` compiles the
+  embedded stylesheet) instead of the custom inline CSS built in 0.2.0,
+  which reasoned incorrectly that Tailwind was "bloat" Seam's design
+  system didn't need. All of `internal/ui` migrated to Seam's own
+  button/table/form Tailwind class conventions. Compiled output is
+  committed and embedded via `go:embed` — never fetched at runtime, same
+  disconnected-operation guarantee as 0.2.2, now via the real system
+  instead of a substitute.
+
+## [0.2.2] — 2026-08-03
+
+- Fixed: htmx was being loaded from a CDN, directly violating xoluman's
+  disconnected-operation requirement (it manages xolu instances that may
+  be on air-gapped local networks). Vendored locally
+  (`web/static/vendor/htmx@1.9.10.min.js`) and embedded into the binary,
+  same as `modal.js`. Added `TestPage_NoExternalCDNReferences` so this
+  can't silently regress again.
+- Corrected a mischaracterization in `docs/KNOWN_ISSUES.md`: vendoring
+  Tailwind/htmx/Lit in Seam was never about avoiding "bloat" — it's
+  about the whole application working without internet access at all.
+  Recorded as a foundational, project-wide decision, not a page-level
+  detail.
+- Filed T-11: bulk/grid data editing (as distinct from T-07's
+  single-entity form) via vendored Tabulator (MIT, vanilla JS — Glide
+  Data Grid was ruled out, confirmed React-only with no vanilla build)
+  wrapped in a Lit shell, matching the architecture already established
+  for the FSM editor and planned for the graph editor.
+
+## [0.2.1] — 2026-08-03
+
+- Correction: the connection management UI shipped in 0.2.0 didn't
+  actually carry over the modal/listing conventions agreed earlier in
+  the project — full-page navigation instead of a modal, browser
+  `confirm()` instead of a modal confirmation, one-off table markup
+  instead of a reusable component. Fixed: `internal/ui/listing.go`
+  (trimmed adaptation of Seam's listing engine, no Tailwind/Material
+  Icons dependency), `web/static/js/modal.js` (from-scratch `XModal`
+  controller, same API shape as Seam's `SeamModal`, much smaller),
+  embedded via `web/embed.go`. Connection management refactored onto
+  both. Re-verified end-to-end against the real binary.
+
+## [0.2.0] — 2026-08-03
+
+- `cmd/xoluman`: the actual binary entrypoint. Loads settings, builds
+  the configured `connstore` backend, starts the HTTP server.
+- `internal/server`: route table on the standard library's
+  method+pattern `http.ServeMux` (Go 1.22+) — no router dependency.
+- `internal/ui`: minty-based page shell and nav; connection
+  list/add/delete pages; an htmx "Test connection" button backed by
+  `client.Health`.
+- `internal/xoluext.BuildClient`: stored `Connection` →
+  `*xolu/pkg/client.Client`, auth mode and tenant mapping verified
+  against actual outgoing requests.
+- Verified end-to-end against a real running xolu instance, not just
+  the test suite: connection management (add, list, test, delete) works
+  in a real browser round-trip against real xolu. Reachable/unreachable
+  states confirmed by actually killing the upstream mid-test.
+- Partially closes T-10 (◐) — the connection management half is done
+  and tested (100%/90.2%/100% coverage: server/ui/xoluext); the entity
+  browser half is blocked on T-07, not yet started.
+
+## [0.1.0] — 2026-08-03
+
+- Project scaffolded: repo layout, repoman tooling installed and
+  verified (selftest: 18/18 green), tracking-document taxonomy in
+  place (`TRACKING.md`, `RESOLVED.md`, `KNOWN_ISSUES.md`).
+- `internal/config`: app configuration directory resolution and
+  `settings.json` (secret storage backend selection, `file` or
+  `keyring`, made once at first run).
+- `internal/connstore`: the `Store` interface and both backends —
+  `FileBackend` (plaintext JSON, `0600`, atomic writes) and
+  `KeyringBackend` (metadata in JSON, tokens in the OS keyring via
+  `github.com/zalando/go-keyring`, never both in the same place).
+  86.0%/78.0% statement coverage (connstore/config). Closes T-06 — see
+  `docs/RESOLVED.md`. T-04 (keyring backend) ships implemented and
+  behaviourally tested against an in-memory mock, but stays open at
+  partial (◐) pending a real-OS-keyring round-trip that this sandbox
+  cannot run — see the dormant guard in `docs/KNOWN_ISSUES.md`.
+- repoman fix (in-repo copy, not yet reported upstream): `register.py
+  close` could not perform a brand-new repository's first-ever closure
+  — it required an existing `## ` entry in `RESOLVED.md` to insert
+  before, which no fresh repository has. Now falls back to appending
+  after the intro prose when none exists.

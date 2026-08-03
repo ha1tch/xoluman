@@ -1,0 +1,16 @@
+{
+  "name": "xoluman",
+  "version": "0.2.2",
+  "description": "Frontend build tooling for xoluman — Tailwind CSS generation (build-time only, never at runtime)",
+  "private": true,
+  "scripts": {
+    "css": "tailwindcss -c tailwind.config.js -i scripts/tailwind.input.css -o web/static/css/tailwind.css --minify",
+    "css:watch": "tailwindcss -c tailwind.config.js -i scripts/tailwind.input.css -o web/static/css/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.19"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
