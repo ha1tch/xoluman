@@ -1,4 +1,4 @@
-Version: 0.6.16
+Version: 0.6.17
 Last reviewed: 2026-08-03
 
 # xoluman — Live Register
@@ -16,6 +16,7 @@ limits and recorded decisions rather than open work.
 | T-15 | REF field navigation + listbox/select fields via xoluman_field_meta | ref-and-listbox | P2 | ◐ | After: none, self-contained. No new xolu API needed for anything in scope. |
 | T-21 | Client.Health() still doesn't apply auth — re-filed, only remaining item from the original xolu request | xolu-client-ext | P2 | ☐ | After: none, standalone |
 | T-22 | Backup/export UI feature using xolu v0.25.0's Client.Export | import-export | P2 | ☐ | After: none, xolu v0.25.0 Client.Export available now |
+| T-23 | xolu client bug: GetEntitySchema/DefineEntitySchema wrongly tenant-prefixed — workaround shipped, request filed | xolu-client-ext | P1 | ◐ | After: none. Waiting on xolu team response to docs/xolu-requests-tenant-schema.md. |
 
 ## Detail
 
@@ -83,6 +84,12 @@ Two features from an explicit difficulty assessment (2026-08-03): REF fields as 
 Theme: xolu-client-ext · Priority: P2 · Status: ☐ · Blocks/after: After: none, standalone
 
 The only item from the original docs/xolu-requests.md not addressed by xolu v0.25.0 (confirmed by direct re-inspection of pkg/client/client.go's Health() -- unchanged, still never sets an Authorization header). xoluman's 'Test connection' and 'Test before saving' (v0.6.6) can therefore still only confirm the server is reachable, never that the configured credential is actually valid -- a connection with a wrong or expired token looks identical to a correctly-configured one. Re-file as its own focused ask to the xolu team rather than letting it stay buried as one item in a since-closed six-item document.
+
+### T-23. xolu client bug: GetEntitySchema/DefineEntitySchema wrongly tenant-prefixed — workaround shipped, request filed
+
+Theme: xolu-client-ext · Priority: P1 · Status: ◐ · Blocks/after: After: none. Waiting on xolu team response to docs/xolu-requests-tenant-schema.md.
+
+Real, severe bug: any xoluman connection with a tenant configured was completely broken for entity browsing — every GetEntitySchema call (Show, EditForm, NewForm, Create, Update, GridView, ImportPreview) failed with XOLU-ST004 'Invalid ID'. Root cause confirmed precisely: Client.buildURL applies the tenant path prefix to every request once a tenant is set, with no per-endpoint awareness; /schema/{entity} is registered on the server only at the global level (confirmed against pkg/server/server.go's own route table), never duplicated under the tenant router, unlike /entities, schema-suggestion, and both promote endpoints which genuinely are. A tenant-scoped client's schema fetch for 'companies' therefore requests /api/v1/tenant/{tenant}/schema/companies -- xolu's router matches this against the entity-by-id pattern instead, landing 'companies' in the numeric {id} slot, failing strconv.Atoi. Reproduced byte-for-byte via direct curl before touching any xoluman code, using xolu's own examples/crm demo (the realistic, tenant-scoped, multi-entity-type dataset that finally surfaced it after several sessions of not being able to reproduce with tenant-less test data). Fixed in xoluman: internal/xoluext.BuildSchemaClient() builds a second, tenant-less client per connection used only for the two schema calls; all 6 real call sites migrated (Show, resolveEntityFields covering NewForm/Create, EditForm, Update, GridView, ImportPreview); 2 call sites (GridView, ImportPreview) had their now-unnecessary regular clientFor call removed entirely rather than left unused. 7 new tests. Verified end-to-end against examples/crm: the exact previously-failing request now returns 200 with correct data; a full sweep across all 6 entity types' list pages, edit pages, and ref links (121 URLs) found zero failures. Request filed to the xolu team (docs/xolu-requests-tenant-schema.md) since the correct long-term fix is in the client library itself; xoluman's workaround is not something to keep maintaining once that lands.
 
 ## import-export
 

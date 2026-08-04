@@ -81,6 +81,18 @@ func (h *EntitiesHandler) clientFor(ctx context.Context, name string) (*xclient.
 	return xoluext.BuildClient(conn), nil
 }
 
+// schemaClientFor returns a tenant-less client for GetEntitySchema/
+// DefineEntitySchema calls specifically — see xoluext.BuildSchemaClient's
+// own doc comment for exactly why these two calls need a different
+// client than every other entity operation on the same connection.
+func (h *EntitiesHandler) schemaClientFor(ctx context.Context, name string) (*xclient.Client, error) {
+	conn, err := h.store.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return xoluext.BuildSchemaClient(conn), nil
+}
+
 // writeConnectionNotFound renders a plain 404 when {name} doesn't match
 // a stored connection — every handler below hits this the same way.
 func writeConnectionNotFound(w http.ResponseWriter, name string) {
@@ -220,7 +232,12 @@ func (h *EntitiesHandler) Show(w http.ResponseWriter, r *http.Request) {
 	// not fail this page — c.List below doesn't need a schema at all,
 	// only the preview-column choice does, and that has a fallback.
 	var previewCols []xclient.FieldDef
-	schema, err := c.GetEntitySchema(r.Context(), entityType)
+	schemaClient, err := h.schemaClientFor(r.Context(), name)
+	if err != nil {
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	schema, err := schemaClient.GetEntitySchema(r.Context(), entityType)
 	switch {
 	case err == nil:
 		previewCols = previewFields(schema.Fields)
@@ -485,8 +502,8 @@ func paginationBar(basePath string, page, totalPages int) mi.H {
 // no schema AND no existing data to infer from either. The caller
 // should show a clear message then, not attempt to render a
 // meaningless empty form.
-func (h *EntitiesHandler) resolveEntityFields(ctx context.Context, c *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
-	schema, schemaErr := c.GetEntitySchema(ctx, entityType)
+func (h *EntitiesHandler) resolveEntityFields(ctx context.Context, c, schemaClient *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
+	schema, schemaErr := schemaClient.GetEntitySchema(ctx, entityType)
 	switch {
 	case schemaErr == nil:
 		return schema.Fields, schema, true, nil
@@ -537,7 +554,12 @@ func (h *EntitiesHandler) NewForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
+	schemaClient, err := h.schemaClientFor(r.Context(), name)
+	if err != nil {
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, schemaClient, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
@@ -570,7 +592,12 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
+	schemaClient, err := h.schemaClientFor(r.Context(), name)
+	if err != nil {
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, schemaClient, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
@@ -628,7 +655,12 @@ func (h *EntitiesHandler) EditForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, err := c.GetEntitySchema(r.Context(), entityType)
+	schemaClient, err := h.schemaClientFor(r.Context(), name)
+	if err != nil {
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	schema, err := schemaClient.GetEntitySchema(r.Context(), entityType)
 	if err != nil && !isNotFoundError(err) {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
@@ -672,7 +704,12 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, schemaErr := c.GetEntitySchema(r.Context(), entityType)
+	schemaClient, err := h.schemaClientFor(r.Context(), name)
+	if err != nil {
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	schema, schemaErr := schemaClient.GetEntitySchema(r.Context(), entityType)
 	if schemaErr != nil && !isNotFoundError(schemaErr) {
 		writeUpstreamError(w, name, r.URL.Path, schemaErr)
 		return

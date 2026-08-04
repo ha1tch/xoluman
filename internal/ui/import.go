@@ -60,7 +60,7 @@ func (h *EntitiesHandler) ImportPreview(w http.ResponseWriter, r *http.Request) 
 	entityType := r.PathValue("type")
 	basePath := entitiesBasePath(name, entityType)
 
-	c, err := h.clientFor(r.Context(), name)
+	schemaClient, err := h.schemaClientFor(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, connstore.ErrNotFound) {
 			writeConnectionNotFound(w, name)
@@ -69,8 +69,7 @@ func (h *EntitiesHandler) ImportPreview(w http.ResponseWriter, r *http.Request) 
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
-
-	schema, err := c.GetEntitySchema(r.Context(), entityType)
+	schema, err := schemaClient.GetEntitySchema(r.Context(), entityType)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return

@@ -2,6 +2,50 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.6.17] — 2026-08-04
+
+- **T-23: found and fixed the actual root cause of "clicking any
+  entity gives XOLU-ST004: Invalid ID"** — a bug that survived two
+  prior sessions of investigation and a whole (real, but ultimately
+  unrelated) URL-escaping fix, because every earlier test used
+  `AuthType=none` with no tenant configured, and this only manifests
+  for a tenant-scoped connection.
+  - Root cause, confirmed precisely: `Client.buildURL` applies the
+    tenant path prefix to every request once a tenant is set, with no
+    per-endpoint awareness of which endpoints are actually
+    tenant-scoped. `/schema/{entity}` (`GetEntitySchema`/
+    `DefineEntitySchema`) is registered on xolu's server only at the
+    global level — confirmed directly against the route table, never
+    duplicated under the tenant router, unlike `/entities`,
+    schema-suggestion, and both promote endpoints, which genuinely
+    are. A tenant-scoped client's schema fetch for `companies`
+    therefore requests `/api/v1/tenant/{tenant}/schema/companies` —
+    xolu's router matches this against its entity-by-id pattern
+    instead, landing `"companies"` in the numeric `{id}` slot, and
+    `strconv.Atoi` fails exactly as `XOLU-ST004`.
+  - Found by running xolu's own `examples/crm` demo — the realistic,
+    tenant-scoped, six-entity-type dataset needed to actually surface
+    this, after which it reproduced byte-for-byte via direct curl
+    before a single line of xoluman code was touched.
+  - Fixed: `internal/xoluext.BuildSchemaClient()` builds a second,
+    tenant-less client per connection, used only for the two schema
+    calls. All 6 real call sites migrated (`Show`,
+    `resolveEntityFields` covering `NewForm`/`Create`, `EditForm`,
+    `Update`, `GridView`, `ImportPreview`) — two of them (`GridView`,
+    `ImportPreview`) had their now-unnecessary regular client fetch
+    removed entirely rather than left dangling unused.
+  - 7 new tests, full suite green.
+  - Verified end-to-end against `examples/crm`: the exact
+    previously-failing request now returns 200 with correct data, and
+    a full sweep across all 6 entity types' list pages, edit pages,
+    and every ref link (121 URLs total) found zero failures.
+  - This is a real bug in xolu's client library, not something fixable
+    from xoluman's side alone — filed as its own focused request
+    (`docs/xolu-requests-tenant-schema.md`) with the exact reproduction
+    and both possible fixes named plainly. xoluman's workaround is
+    explicitly not meant to be maintained indefinitely once the client
+    library closes the gap.
+
 ## [0.6.16] — 2026-08-04
 
 - **Real bug fixed, systemically: connection names and entity type
