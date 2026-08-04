@@ -119,14 +119,26 @@ class XoluGridEditor extends LitElement {
       <style>
         .xolu-grid-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
         .xolu-grid-status { font-size: 0.875rem; color: var(--xolu-grid-status-color, #64748b); }
+        .dark .xolu-grid-status { color: var(--xolu-grid-status-color, #94a3b8); }
         .xolu-grid-save-btn {
           padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500;
           border-radius: 0.5rem; border: none; cursor: pointer;
           background: #4f46e5; color: #fff;
         }
         .xolu-grid-save-btn:disabled { background: #a5b4fc; cursor: default; }
+        .dark .xolu-grid-save-btn:disabled { background: #4338ca; color: #c7d2fe; }
         .xolu-grid-results { margin-top: 0.5rem; font-size: 0.875rem; }
         .xolu-grid-results ul { margin: 0.25rem 0 0 1.25rem; }
+        /* Success/error colors match xoluman's own established
+           green-600/dark:green-400 and red-600/dark:red-400
+           convention used everywhere else in the app (e.g.
+           connections.go's Test-connection status) — consistency
+           with the rest of xoluman's own palette, not a one-off pair
+           of colors picked just for this component. */
+        .xolu-grid-results-ok { color: #16a34a; }
+        .dark .xolu-grid-results-ok { color: #4ade80; }
+        .xolu-grid-results-error { color: #dc2626; }
+        .dark .xolu-grid-results-error { color: #f87171; }
       </style>
       <div class="xolu-grid-toolbar">
         <div class="xolu-grid-status">
@@ -148,10 +160,10 @@ class XoluGridEditor extends LitElement {
     if (!this._lastResults) return html``;
     const failed = this._lastResults.filter((r) => !r.success);
     if (failed.length === 0) {
-      return html`<div class="xolu-grid-results" style="color:#16a34a;">All changes saved.</div>`;
+      return html`<div class="xolu-grid-results xolu-grid-results-ok">All changes saved.</div>`;
     }
     return html`
-      <div class="xolu-grid-results" style="color:#dc2626;">
+      <div class="xolu-grid-results xolu-grid-results-error">
         ${failed.length} row(s) failed to save:
         <ul>
           ${failed.map((f) => html`<li>Row ${f.id}: ${f.message || 'unknown error'}</li>`)}

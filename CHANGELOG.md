@@ -2,6 +2,79 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.6.16] — 2026-08-04
+
+- **Real bug fixed, systemically: connection names and entity type
+  names were never URL-escaped anywhere they flowed into a path —
+  across the whole UI layer** (`entities.go`, `grid.go`, `import.go`,
+  `promote.go`, `blobs.go`, `connections.go`, `query.go`). Confirmed
+  directly: a connection named "My Server" rendered a literal,
+  unescaped space into every href built from it. A character with real
+  meaning in a URL path — `/`, `#`, `?`, `%` — landing unescaped could
+  plausibly shift what the server-side router captures for an adjacent
+  path segment, a very likely explanation for the reported "clicking
+  any entity gives XOLU-ST004: Invalid ID," though that couldn't be
+  conclusively reproduced with a simple name before this fix. Verified
+  end-to-end with a full click-through against real xolu — connections
+  list → Entities link → entity type list → Edit link — using a
+  connection deliberately named with a space, every hop correctly
+  `%20`-escaped, landing on a working edit page.
+  - Introduced `entitiesBasePath()` (escaped) as the shared helper for
+    the most common pattern, replacing 16 raw-concatenation call
+    sites.
+  - The blob browser needed a more careful split: `joinPath` (kept
+    unescaped, used only for hidden form field values — a browser's
+    own form submission already percent-encodes those, so escaping
+    here would double-encode) versus a new `joinPathForURL` (escaped,
+    for actual hrefs, where a browser does *not* re-encode before
+    navigating).
+  - 5 new regression tests.
+- **Theme consistency, several real gaps closed — direct
+  consequence of trimming Seam AMS's dark-mode-aware widget pattern
+  down to nothing when xoluman's own versions were first built,
+  rather than carrying the pattern itself forward.** `modal.js`'s own
+  history literally recorded the decision ("dark-mode detection... not
+  yet needed") well before the theme toggle existed to need it, and it
+  was never revisited once the toggle shipped.
+  - `modal.js`: restored Seam's `document.documentElement.classList.
+    contains('dark')`-at-build-time pattern (Seam's own SeamModal/
+    SeamPopover convention), replacing the CSS `Canvas`/`CanvasText`
+    system colors that were following the *OS* preference rather than
+    xoluman's own explicit toggle state — the actual mechanism of the
+    inconsistency.
+  - Tabulator (grid view): confirmed it ships no CSS custom properties
+    to hook into; added a hand-written `.dark`-scoped override
+    stylesheet (`tabulator-dark-overrides.css`) rather than swapping in
+    Tabulator's own separate "midnight" theme, which would have meant
+    a second, inconsistent theming mechanism alongside the single
+    class-toggle one xoluman already uses everywhere else.
+  - CodeMirror (query editor): added `@codemirror/theme-one-dark`
+    (MIT; its dependencies were already in the bundle), wired through
+    a `Compartment` with a `MutationObserver` watching `<html>`'s
+    class attribute — this editor can stay open across a toggle,
+    unlike the modal, so it needed live reactivity, not a one-time
+    check. Caught a real follow-on bug while wiring this in: the
+    previous session's mode-switch fix builds a fresh `EditorState` on
+    every tab change, and that fresh state also needed the theme
+    extension included, or switching tabs would silently drop back to
+    light.
+  - Both Lit components' own chrome (tabs, buttons, result/error
+    boxes) had the identical gap — static, light-only hex colors, no
+    dark variants at all. Fixed to match xoluman's own established
+    conventions (`green-600`/`dark:green-400`, `red-600`/
+    `dark:red-400`, `indigo-600`/`dark:indigo-400`) rather than
+    inventing new ad hoc colors per component.
+  - The Go-rendered pages were checked too and found already correct —
+    every color there goes through Tailwind's `dark:` utilities, not a
+    gap of the same kind.
+  - CodeMirror bundle re-vendored (hash and size updated in
+    `VENDOR.md`); new `ownAuthoredCSSFiles` presence-check test added
+    alongside the existing JS one.
+- Verified end-to-end: theme.js, the Tabulator dark-overrides
+  stylesheet, and modal.js's restored logic all confirmed served and
+  correctly wired from their respective pages against a real running
+  instance.
+
 ## [0.6.15] — 2026-08-04
 
 - **README rewritten.** It had genuinely never been updated since the

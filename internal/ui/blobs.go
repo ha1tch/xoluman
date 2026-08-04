@@ -65,7 +65,9 @@ func (h *blobsHandler) clientFor(ctx context.Context, name string) (*xclient.Cli
 
 // splitPath turns the URL's slash-separated {path...} value into
 // segments — blobfs's own vocabulary, which knows nothing about URLs
-// and joins with ":" internally, never "/".
+// and joins with ":" internally, never "/". Segments arrive already
+// percent-decoded — Go's http server does this automatically for path
+// wildcards — so this is a plain split, no unescaping needed here.
 func splitPath(urlPath string) []string {
 	urlPath = strings.Trim(urlPath, "/")
 	if urlPath == "" {
@@ -74,8 +76,32 @@ func splitPath(urlPath string) []string {
 	return strings.Split(urlPath, "/")
 }
 
+// joinPath is for hidden form field VALUES only (the "path" input on
+// the upload/new-folder/delete-folder forms) — deliberately NOT
+// percent-escaped. A browser's own form submission already percent-
+// encodes an attribute's raw text for the form-urlencoded body, and Go
+// decodes it back automatically on the receiving end; escaping it here
+// too would double-encode and corrupt the round trip through
+// splitPath. Never use this to build an href — see joinPathForURL.
 func joinPath(segments []string) string {
 	return strings.Join(segments, "/")
+}
+
+// joinPathForURL is for actual href/action URLs — segments are
+// user-controlled (a folder name someone typed, or a filename someone
+// uploaded), and unlike a form submission, a browser does not
+// re-encode an href's literal text before navigating to it. A literal
+// "?", "#", or space in a folder name would otherwise be
+// misinterpreted as URL structure (a query string, a fragment) rather
+// than a literal character in the path — real bug, same class as the
+// connection-name one fixed elsewhere in this codebase, confirmed by
+// the same kind of direct test before this existed.
+func joinPathForURL(segments []string) string {
+	escaped := make([]string, len(segments))
+	for i, s := range segments {
+		escaped[i] = url.PathEscape(s)
+	}
+	return strings.Join(escaped, "/")
 }
 
 func (h *blobsHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -104,14 +130,14 @@ func (h *blobsHandler) List(w http.ResponseWriter, r *http.Request) {
 
 func blobBrowserBody(connName string, path []string, items []blobfs.Item) mi.H {
 	return func(b *mi.Builder) mi.Node {
-		basePath := "/connections/" + connName + "/blobs"
+		basePath := "/connections/" + url.PathEscape(connName) + "/blobs"
 
 		// Breadcrumb: "root" plus one link per path segment, each
 		// pointing at the URL for browsing up to that level.
 		crumbs := []interface{}{b.A(mi.Href(basePath), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), "root")}
 		for i, seg := range path {
 			crumbs = append(crumbs, " / ")
-			crumbURL := basePath + "/" + joinPath(path[:i+1])
+			crumbURL := basePath + "/" + joinPathForURL(path[:i+1])
 			crumbs = append(crumbs, b.A(mi.Href(crumbURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), seg))
 		}
 		breadcrumb := b.Div(append([]interface{}{mi.Class("text-sm mb-4")}, crumbs...)...)
@@ -120,7 +146,7 @@ func blobBrowserBody(connName string, path []string, items []blobfs.Item) mi.H {
 		rows := make([]mi.Node, len(items))
 		for i, item := range items {
 			if item.IsFolder {
-				folderURL := basePath + "/" + joinPath(append(append([]string{}, path...), item.Name))
+				folderURL := basePath + "/" + joinPathForURL(append(append([]string{}, path...), item.Name))
 				explicitLabel := ""
 				if item.Explicit {
 					explicitLabel = " (kept empty)"
@@ -137,7 +163,7 @@ func blobBrowserBody(connName string, path []string, items []blobfs.Item) mi.H {
 				continue
 			}
 			key := blobfs.KeyForPath(append(append([]string{}, path...), item.Name))
-			downloadURL := "/connections/" + connName + "/blob-download?key=" + urlQueryEscape(key)
+			downloadURL := "/connections/" + url.PathEscape(connName) + "/blob-download?key=" + urlQueryEscape(key)
 			rows[i] = b.Tr(
 				b.Td(mi.Class(td), b.A(mi.Href(downloadURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), item.Name)),
 				b.Td(mi.Class(td), formatBytes(item.Size)),
@@ -146,12 +172,12 @@ func blobBrowserBody(connName string, path []string, items []blobfs.Item) mi.H {
 		}
 		table := Table([]string{"Name", "Size", ""}, rows, "This folder is empty.")(b)
 
-		uploadForm := b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+connName+"/blob-upload"), mi.Attr("enctype", "multipart/form-data"), mi.Class("flex gap-2 items-end mb-3"),
+		uploadForm := b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+url.PathEscape(connName)+"/blob-upload"), mi.Attr("enctype", "multipart/form-data"), mi.Class("flex gap-2 items-end mb-3"),
 			b.Input(mi.Type("hidden"), mi.Name("path"), mi.Value(joinPath(path))),
 			b.Input(mi.Type("file"), mi.Name("file"), mi.Required()),
 			b.Button(mi.Type("submit"), mi.Class(btnSecondary), "Upload"),
 		)
-		newFolderForm := b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+connName+"/blob-new-folder"), mi.Class("flex gap-2 items-end mb-4"),
+		newFolderForm := b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+url.PathEscape(connName)+"/blob-new-folder"), mi.Class("flex gap-2 items-end mb-4"),
 			b.Input(mi.Type("hidden"), mi.Name("path"), mi.Value(joinPath(path))),
 			b.Input(mi.Type("text"), mi.Name("name"), mi.Placeholder("new folder name"), mi.Class(formInputClass), mi.Required()),
 			b.Button(mi.Type("submit"), mi.Class(btnSecondary), "New folder"),
@@ -169,7 +195,7 @@ func blobBrowserBody(connName string, path []string, items []blobfs.Item) mi.H {
 
 func deleteFileForm(connName, key string) mi.H {
 	return func(b *mi.Builder) mi.Node {
-		return b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+connName+"/blob-delete"), mi.Style("display:inline;"),
+		return b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+url.PathEscape(connName)+"/blob-delete"), mi.Style("display:inline;"),
 			b.Input(mi.Type("hidden"), mi.Name("key"), mi.Value(key)),
 			b.Button(mi.Type("submit"), mi.Class(btnDanger), "Delete"),
 		)
@@ -178,7 +204,7 @@ func deleteFileForm(connName, key string) mi.H {
 
 func deleteFolderForm(connName string, parentPath []string, folderName string) mi.H {
 	return func(b *mi.Builder) mi.Node {
-		return b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+connName+"/blob-delete-folder"), mi.Style("display:inline;"),
+		return b.Form(mi.Attr("method", "post"), mi.Attr("action", "/connections/"+url.PathEscape(connName)+"/blob-delete-folder"), mi.Style("display:inline;"),
 			b.Input(mi.Type("hidden"), mi.Name("path"), mi.Value(joinPath(parentPath))),
 			b.Input(mi.Type("hidden"), mi.Name("name"), mi.Value(folderName)),
 			b.Button(mi.Type("submit"), mi.Class(btnDanger), "Delete"),
@@ -369,11 +395,11 @@ func (h *blobsHandler) DeleteFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func blobBrowseURL(connName string, path []string) string {
-	base := "/connections/" + connName + "/blobs"
+	base := "/connections/" + url.PathEscape(connName) + "/blobs"
 	if len(path) == 0 {
 		return base
 	}
-	return base + "/" + joinPath(path)
+	return base + "/" + joinPathForURL(path)
 }
 
 func formatBytes(n int64) string {

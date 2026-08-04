@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	mi "github.com/ha1tch/minty"
@@ -51,7 +52,7 @@ func (h *queryHandler) View(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	basePath := "/connections/" + name + "/query"
+	basePath := "/connections/" + url.PathEscape(name) + "/query"
 	body := func(b *mi.Builder) mi.Node {
 		return b.Div(
 			b.H1(mi.Class("text-xl font-semibold text-gray-900 dark:text-white mb-4"), "Query "+name),

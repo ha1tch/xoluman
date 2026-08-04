@@ -123,7 +123,7 @@ func connectionRow(b *mi.Builder, c connstore.Connection, index int) mi.Node {
 	}
 	statusID := "status-" + strconv.Itoa(index)
 	td := "px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300"
-	deleteConfirmURL := "/connections/" + c.Name + "/delete-confirm"
+	deleteConfirmURL := "/connections/" + url.PathEscape(c.Name) + "/delete-confirm"
 	return b.Tr(mi.ID("conn-row-"+c.Name),
 		b.Td(mi.Class(td), c.Name),
 		b.Td(mi.Class(td), c.BaseURL),
@@ -132,12 +132,12 @@ func connectionRow(b *mi.Builder, c connstore.Connection, index int) mi.Node {
 		b.Td(mi.Class(td), mi.ID(statusID), "untested"),
 		b.Td(mi.Class(td),
 			b.Div(mi.Class("flex gap-2"),
-				b.A(mi.Href("/connections/"+c.Name+"/entities"), mi.Class(btnSecondary), "Entities"),
-				b.A(mi.Href("/connections/"+c.Name+"/blobs"), mi.Class(btnSecondary), "Blobs"),
-				b.A(mi.Href("/connections/"+c.Name+"/query"), mi.Class(btnSecondary), "Query"),
+				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/entities"), mi.Class(btnSecondary), "Entities"),
+				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/blobs"), mi.Class(btnSecondary), "Blobs"),
+				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/query"), mi.Class(btnSecondary), "Query"),
 				b.Button(
 					mi.Type("button"), mi.Class(btnSecondary),
-					mi.HxPost("/connections/"+c.Name+"/test"),
+					mi.HxPost("/connections/"+url.PathEscape(c.Name)+"/test"),
 					mi.HxTarget("#"+statusID),
 					mi.HxSwap("innerHTML"),
 					"Test",
@@ -301,7 +301,7 @@ func friendlySaveError(err error) string {
 // connection.
 func (h *ConnectionsHandler) DeleteConfirm(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	WriteModalAware(w, r, "Delete connection", DeleteConfirmBody(name, "/connections/"+name+"/delete"))
+	WriteModalAware(w, r, "Delete connection", DeleteConfirmBody(name, "/connections/"+url.PathEscape(name)+"/delete"))
 }
 
 // Delete removes the named connection and returns to the list. Deleting

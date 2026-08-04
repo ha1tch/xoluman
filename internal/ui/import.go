@@ -28,7 +28,7 @@ const maxImportUploadBytes = 20 << 20 // 20MB
 func (h *EntitiesHandler) ImportForm(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	entityType := r.PathValue("type")
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 
 	body := func(b *mi.Builder) mi.Node {
 		return b.Div(
@@ -58,7 +58,7 @@ func (h *EntitiesHandler) ImportForm(w http.ResponseWriter, r *http.Request) {
 func (h *EntitiesHandler) ImportPreview(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	entityType := r.PathValue("type")
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 
 	c, err := h.clientFor(r.Context(), name)
 	if err != nil {
@@ -202,7 +202,7 @@ func (h *EntitiesHandler) ImportConfirm(w http.ResponseWriter, r *http.Request) 
 		succeeded++
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	body := func(b *mi.Builder) mi.Node {
 		td := "px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm"
 		rowNodes := make([]mi.Node, len(results))

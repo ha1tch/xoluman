@@ -6,6 +6,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/ha1tch/xoluman/internal/connstore"
 )
 
 // fakeXoluBlobs is a minimal, genuinely stateful blob+folder-entity
@@ -123,6 +126,49 @@ func newFakeXoluBlobs(t *testing.T) *httptest.Server {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	return server
+}
+
+func TestJoinPathForURL_EscapesSegments(t *testing.T) {
+	got := joinPathForURL([]string{"my folder", "weird?name"})
+	want := "my%20folder/weird%3Fname"
+	if got != want {
+		t.Fatalf("joinPathForURL = %q, want %q", got, want)
+	}
+}
+
+func TestJoinPath_DoesNotEscape(t *testing.T) {
+	// Deliberately unescaped — see joinPath's own doc comment. Form
+	// field values round-trip through the browser's own submission
+	// encoding; pre-escaping here would double-encode.
+	got := joinPath([]string{"my folder", "sub"})
+	want := "my folder/sub"
+	if got != want {
+		t.Fatalf("joinPath = %q, want %q (unescaped)", got, want)
+	}
+}
+
+func TestBlobsHandler_List_ConnectionNameWithSpaceEscapedInLinks(t *testing.T) {
+	store := connstore.NewFileBackend(t.TempDir())
+	server := newFakeXoluBlobs(t)
+	if _, err := store.Save(context.Background(), connstore.Connection{
+		ConnectionMeta: connstore.ConnectionMeta{Name: "My Server", BaseURL: server.URL, AuthMode: connstore.AuthNone},
+	}); err != nil {
+		t.Fatalf("seeding connection: %v", err)
+	}
+	h := &blobsHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/My%20Server/blobs", nil)
+	req.SetPathValue("name", "My Server")
+	rec := httptest.NewRecorder()
+	h.List(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, `"/connections/My Server/`) {
+		t.Fatalf("body contains an unescaped space in a connection-name-derived URL: %s", body)
+	}
+	if !strings.Contains(body, `/connections/My%20Server/`) {
+		t.Fatalf("body missing the properly-escaped connection name: %s", body)
+	}
 }
 
 func TestBlobsHandler_List_EmptyRoot(t *testing.T) {

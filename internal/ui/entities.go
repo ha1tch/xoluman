@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	mi "github.com/ha1tch/minty"
@@ -105,6 +106,22 @@ func writeUpstreamError(w http.ResponseWriter, connName string, activePath strin
 // ─── Entity type list ────────────────────────────────────────────────────
 
 // List renders the entity types available on the named connection.
+// entitiesBasePath returns "/connections/{name}/entities/{entityType}"
+// with both segments properly escaped via url.PathEscape — not the
+// raw values. A real, confirmed bug this fixes: connection names and
+// entity type names flowed unescaped into every URL path built from
+// them throughout this codebase. A connection named "My Server"
+// rendered a literal, unescaped space directly into href values; any
+// character with real meaning in a URL path (a slash, a percent sign,
+// a hash) could shift what the server-side router actually captures
+// for adjacent path segments — plausibly the root cause of "clicking
+// any entity gives XOLU-ST004: Invalid ID," though that couldn't be
+// conclusively reproduced before this fix; this closes the class of
+// bug regardless.
+func entitiesBasePath(connName, entityType string) string {
+	return "/connections/" + url.PathEscape(connName) + "/entities/" + url.PathEscape(entityType)
+}
+
 func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
@@ -116,7 +133,7 @@ func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 	// ListEntityTypes (confirmed: reflects validator.LoadedEntities(),
 	// registered schemas only — nothing to do with what data exists).
 	if jump := r.URL.Query().Get("type"); jump != "" {
-		http.Redirect(w, r, "/connections/"+name+"/entities/"+jump, http.StatusSeeOther)
+		http.Redirect(w, r, entitiesBasePath(name, jump), http.StatusSeeOther)
 		return
 	}
 
@@ -140,7 +157,7 @@ func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 		header := b.Div(mi.Class("mb-4"),
 			b.H1(mi.Class("text-xl font-semibold text-gray-900 dark:text-white"), "Entities on "+name),
 		)
-		jumpForm := b.Form(mi.Attr("method", "get"), mi.Attr("action", "/connections/"+name+"/entities"), mi.Class("mb-4 flex gap-2 items-end"),
+		jumpForm := b.Form(mi.Attr("method", "get"), mi.Attr("action", "/connections/"+url.PathEscape(name)+"/entities"), mi.Class("mb-4 flex gap-2 items-end"),
 			b.Div(
 				b.Label(mi.For("type"), mi.Class("block mb-1 text-sm text-gray-600 dark:text-gray-400"), "Jump to a type by name"),
 				b.Input(mi.Type("text"), mi.ID("type"), mi.Name("type"), mi.Placeholder("e.g. gadgets"), mi.Class(formInputClass)),
@@ -161,12 +178,12 @@ func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 				schemaLabel = "has schema"
 				schemaClass = "text-gray-600 dark:text-gray-400"
 			} else {
-				promoteLink = b.A(mi.Href("/connections/"+name+"/entities/"+e.EntityType+"/promote"),
+				promoteLink = b.A(mi.Href(entitiesBasePath(name, e.EntityType)+"/promote"),
 					mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline text-xs"), "Promote to schema")
 			}
 			rows[i] = b.Tr(
 				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm"),
-					b.A(mi.Href("/connections/"+name+"/entities/"+e.EntityType), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), e.EntityType),
+					b.A(mi.Href(entitiesBasePath(name, e.EntityType)), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), e.EntityType),
 				),
 				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400"), strconv.FormatInt(e.Count, 10)),
 				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm "+schemaClass), schemaLabel),
@@ -232,7 +249,7 @@ func (h *EntitiesHandler) Show(w http.ResponseWriter, r *http.Request) {
 		previewCols = previewFields(inferFieldsFromEntities(result.Entities))
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	cfg := ListPageConfig{Title: entityType, CreateLabel: "New " + entityType, CreateURL: basePath + "/new"}
 	refTargets := refTargetsByField(schema) // nil when schema is nil (inferred fields) — inference has no way to know which fields are references
 	body := func(b *mi.Builder) mi.Node {
@@ -352,7 +369,7 @@ func entityListTable(connName, entityType string, preview []xclient.FieldDef, re
 			return b.Div(mi.Class("text-center py-12 text-gray-500 dark:text-gray-400"), "No "+entityType+" entities yet.")
 		}
 
-		basePath := "/connections/" + connName + "/entities/" + entityType
+		basePath := entitiesBasePath(connName, entityType)
 		td := "px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300"
 
 		columns := make([]string, 0, len(preview)+3)
@@ -374,7 +391,7 @@ func entityListTable(connName, entityType string, preview []xclient.FieldDef, re
 				value := e.Data[f.Name]
 				if target, isRef := refTargets[f.Name]; isRef {
 					if id, embeddedLabel, ok := refValueInfo(value); ok {
-						refURL := "/connections/" + connName + "/entities/" + target + "/" + strconv.FormatInt(id, 10) + "/edit"
+						refURL := entitiesBasePath(connName, target) + "/" + strconv.FormatInt(id, 10) + "/edit"
 						linkText := embeddedLabel
 						if linkText == "" {
 							linkText = strconv.FormatInt(id, 10)
@@ -530,7 +547,7 @@ func (h *EntitiesHandler) NewForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, nil, nil)
 	body := entityFormBody("New "+entityType, basePath, fields, opts, "")
 	WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
@@ -569,7 +586,7 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargetsByField(schema))
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 
 	if len(errs) > 0 {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -629,7 +646,7 @@ func (h *EntitiesHandler) EditForm(w http.ResponseWriter, r *http.Request) {
 		fields = inferFieldsFromEntities([]xclient.Entity{*entity})
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	idStr := strconv.FormatInt(id, 10)
 	opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, formengine.Values(entity.Data), nil)
 	body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, "")
@@ -684,7 +701,7 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargetsByField(schema))
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	idStr := strconv.FormatInt(id, 10)
 
 	if len(errs) > 0 {
@@ -734,7 +751,7 @@ func (h *EntitiesHandler) DeleteConfirm(w http.ResponseWriter, r *http.Request) 
 	name := r.PathValue("name")
 	entityType := r.PathValue("type")
 	id := r.PathValue("id")
-	deleteURL := "/connections/" + name + "/entities/" + entityType + "/" + id + "/delete"
+	deleteURL := entitiesBasePath(name, entityType) + "/" + id + "/delete"
 	WriteModalAware(w, r, "Delete "+entityType, DeleteConfirmBody(entityType+" #"+id, deleteURL))
 }
 
@@ -757,7 +774,7 @@ func (h *EntitiesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	if err := c.Delete(r.Context(), entityType, id); err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return

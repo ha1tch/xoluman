@@ -28,6 +28,13 @@ func gridPage(title, activePath string, body mi.H) mi.H {
 	return func(b *mi.Builder) mi.Node {
 		extraHead := []mi.Node{
 			b.Link(mi.Rel("stylesheet"), mi.Href("/static/vendor/tabulator@6.5.2.min.css")),
+			// Loaded after the base stylesheet so its .dark-scoped
+			// rules win on specificity ties without needing !important
+			// beyond what the base theme itself already forces. See
+			// the file's own doc comment for why this is a hand-
+			// written override rather than swapping in Tabulator's own
+			// alternate "midnight" theme.
+			b.Link(mi.Rel("stylesheet"), mi.Href("/static/css/tabulator-dark-overrides.css")),
 			b.Script(mi.Attr("src", "/static/vendor/tabulator@6.5.2.min.js")),
 			b.Script(mi.Attr("type", "importmap"), mi.Raw(`{"imports":{"lit":"/static/vendor/lit@3.js"}}`)),
 			b.Script(mi.Attr("type", "module"), mi.Attr("src", "/static/js/grid-editor.js")),
@@ -105,7 +112,7 @@ func (h *EntitiesHandler) GridView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	body := func(b *mi.Builder) mi.Node {
 		return b.Div(
 			b.Div(mi.Class("flex items-center justify-between mb-4"),

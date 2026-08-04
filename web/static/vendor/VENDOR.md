@@ -154,11 +154,11 @@ sha256sum web/static/vendor/lit@3.js
 | Field | Value |
 |---|---|
 | Vendored file | `codemirror-bundle@1.js` |
-| npm packages | `codemirror` 6.0.2, `@codemirror/lang-sql` 6.10.0, `@codemirror/lang-json` 6.0.2, `@neo4j-cypher/codemirror` 1.0.3 (plus their own transitive `@codemirror/*`/`@lezer/*` dependencies, all MIT) |
+| npm packages | `codemirror` 6.0.2, `@codemirror/lang-sql` 6.10.0, `@codemirror/lang-json` 6.0.2, `@neo4j-cypher/codemirror` 1.0.3, `@codemirror/theme-one-dark` 6.1.3 (plus their own transitive `@codemirror/*`/`@lezer/*` dependencies, all MIT) |
 | Build tool | esbuild 0.21.5 |
-| License | MIT (CodeMirror core and official language packages), Apache-2.0 (`@neo4j-cypher/codemirror` and its `@neo4j-cypher/editor-support` dependency) — confirmed per-package, not assumed from the design note that first proposed this |
-| Size | 1,204,962 bytes (minified ESM bundle) |
-| SHA-256 | `2d5301fea8f3c7479f02b4d3596462dfa2c9d40d736bb9dc2154946bb17d75bd` |
+| License | MIT (CodeMirror core, official language packages, and `theme-one-dark`), Apache-2.0 (`@neo4j-cypher/codemirror` and its `@neo4j-cypher/editor-support` dependency) — confirmed per-package, not assumed from the design note that first proposed this |
+| Size | 1,207,375 bytes (minified ESM bundle) |
+| SHA-256 | `8eb6c254e17ea8f21542938e209e59b0499bd2cce203d694d149614c870cb9de` |
 | Used in | T-12's query editor (`internal/ui/query.go`, `web/static/js/query-editor.js`) |
 | Replaces CDN | N/A — CodeMirror has no CDN-equivalent single-file distribution; see below |
 
@@ -196,7 +196,8 @@ implemented). No other page is affected.
 **Re-vendoring:**
 ```bash
 npm install codemirror@6.0.2 @codemirror/lang-sql@6.10.0 \
-    @codemirror/lang-json@6.0.2 @neo4j-cypher/codemirror@1.0.3 esbuild@0.21.5
+    @codemirror/lang-json@6.0.2 @neo4j-cypher/codemirror@1.0.3 \
+    @codemirror/theme-one-dark@6.1.3 esbuild@0.21.5
 mkdir -p .buildtmp
 cat > .buildtmp/codemirror-entry.js << 'EOF'
 export { EditorView, basicSetup } from 'codemirror';
@@ -204,6 +205,7 @@ export { EditorState, Compartment } from '@codemirror/state';
 export { sql, MSSQL } from '@codemirror/lang-sql';
 export { json } from '@codemirror/lang-json';
 export { getExtensions as cypherExtensions } from '@neo4j-cypher/codemirror';
+export { oneDark } from '@codemirror/theme-one-dark';
 EOF
 npx esbuild .buildtmp/codemirror-entry.js --bundle --format=esm --minify \
     --outfile=web/static/vendor/codemirror-bundle@1.js
@@ -242,6 +244,6 @@ b3bdcf5c741897a53648b1207fff0469a0d61901429ba1f6e88f98ebd84e669e  htmx@1.9.10.mi
 04802e757fa4189342c666d0f970a01d761c312798f31ffc664c24cbccc7ce3e  tabulator@6.5.2.min.js
 b55e204b2f968cecc4d3663d37858093b31dd22d20f01d76f590726ee18f7e1f  tabulator@6.5.2.min.css
 2363a5c2aea6f202bacd106acea163912eb0e892576742e1156edfd9fc28488b  lit@3.js
-2d5301fea8f3c7479f02b4d3596462dfa2c9d40d736bb9dc2154946bb17d75bd  codemirror-bundle@1.js
+8eb6c254e17ea8f21542938e209e59b0499bd2cce203d694d149614c870cb9de  codemirror-bundle@1.js
 HASHEOF
 ```

@@ -25,7 +25,7 @@
 //   would lose information a raw JSON view doesn't.
 
 import { LitElement, html } from 'lit';
-import { EditorView, basicSetup, EditorState, Compartment, sql, MSSQL, json, cypherExtensions } from 'codemirror-bundle';
+import { EditorView, basicSetup, EditorState, Compartment, sql, MSSQL, json, cypherExtensions, oneDark } from 'codemirror-bundle';
 
 const MODES = ['oql', 'sulpher', 'rest'];
 
@@ -48,6 +48,15 @@ class XoluQueryEditor extends LitElement {
     this._result = null;
     this._error = null;
     this._languageConf = new Compartment();
+    // Same live-reactivity reasoning theme.js's toggle button needs
+    // elsewhere is needed here too, but for a different reason: the
+    // query editor is a persistent widget someone might have open
+    // across a theme toggle, unlike the modal (open-then-closed,
+    // check-once-at-build-time is correct for that). A
+    // MutationObserver on <html>'s class attribute (set up in
+    // firstUpdated, torn down in disconnectedCallback) keeps this
+    // Compartment's contents in sync live, not just at creation.
+    this._themeConf = new Compartment();
     // Each mode keeps its own document — a real bug before this fix:
     // switching modes only reconfigured the language extension
     // (this._languageConf.reconfigure(...)), never the document
@@ -72,10 +81,28 @@ class XoluQueryEditor extends LitElement {
     this._view = new EditorView({
       state: EditorState.create({
         doc: '',
-        extensions: [basicSetup, this._languageConf.of(this._languageExtensionFor(this._mode))],
+        extensions: [
+          basicSetup,
+          this._languageConf.of(this._languageExtensionFor(this._mode)),
+          this._themeConf.of(this._themeExtensionFor()),
+        ],
       }),
       parent: this._editorHost,
     });
+
+    this._themeObserver = new MutationObserver(() => {
+      this._view.dispatch({ effects: this._themeConf.reconfigure(this._themeExtensionFor()) });
+    });
+    this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._themeObserver) this._themeObserver.disconnect();
+  }
+
+  _themeExtensionFor() {
+    return document.documentElement.classList.contains('dark') ? oneDark : [];
   }
 
   _languageExtensionFor(mode) {
@@ -101,7 +128,11 @@ class XoluQueryEditor extends LitElement {
       this._view.setState(
         EditorState.create({
           doc: this._docs[mode] || '',
-          extensions: [basicSetup, this._languageConf.of(this._languageExtensionFor(mode))],
+          extensions: [
+            basicSetup,
+            this._languageConf.of(this._languageExtensionFor(mode)),
+            this._themeConf.of(this._themeExtensionFor()),
+          ],
         })
       );
     }
@@ -154,21 +185,32 @@ class XoluQueryEditor extends LitElement {
         .xolu-query-tab {
           padding: 0.4rem 0.9rem; font-size: 0.875rem; border-radius: 0.5rem 0.5rem 0 0;
           border: 1px solid #d1d5db; border-bottom: none; background: #f3f4f6; cursor: pointer;
+          color: #111827;
         }
+        .dark .xolu-query-tab { border-color: #374151; background: #1f2937; color: #f3f4f6; }
         .xolu-query-tab.active { background: #fff; font-weight: 600; border-color: #4f46e5; color: #4f46e5; }
+        .dark .xolu-query-tab.active { background: #111827; border-color: #818cf8; color: #818cf8; }
         .xolu-query-editor-mount { border: 1px solid #d1d5db; border-radius: 0.5rem; overflow: hidden; }
+        .dark .xolu-query-editor-mount { border-color: #374151; }
         .xolu-query-editor-host .cm-editor { min-height: 160px; }
         .xolu-query-rest-fields { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
         .xolu-query-rest-fields select, .xolu-query-rest-fields input {
           padding: 0.4rem 0.6rem; border: 1px solid #d1d5db; border-radius: 0.375rem; font-size: 0.875rem;
+          background: #fff; color: #111827;
+        }
+        .dark .xolu-query-rest-fields select, .dark .xolu-query-rest-fields input {
+          border-color: #374151; background: #1f2937; color: #f3f4f6;
         }
         .xolu-query-run-btn {
           margin-top: 0.75rem; padding: 0.5rem 1.25rem; font-size: 0.875rem; font-weight: 500;
           border-radius: 0.5rem; border: none; cursor: pointer; background: #4f46e5; color: #fff;
         }
         .xolu-query-run-btn:disabled { background: #a5b4fc; cursor: default; }
-        .xolu-query-result { margin-top: 1rem; padding: 0.75rem; background: #f9fafb; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; max-height: 400px; overflow: auto; }
+        .dark .xolu-query-run-btn:disabled { background: #4338ca; color: #c7d2fe; }
+        .xolu-query-result { margin-top: 1rem; padding: 0.75rem; background: #f9fafb; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; max-height: 400px; overflow: auto; color: #111827; }
+        .dark .xolu-query-result { background: #1f2937; color: #f3f4f6; }
         .xolu-query-error { margin-top: 1rem; padding: 0.75rem; background: #fef2f2; color: #b91c1c; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; }
+        .dark .xolu-query-error { background: rgba(127, 29, 29, 0.3); color: #f87171; }
       </style>
       <div class="xolu-query-tabs">
         ${MODES.map(

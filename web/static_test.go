@@ -68,3 +68,26 @@ func TestOwnAuthoredJSFilesPresent(t *testing.T) {
 		}
 	}
 }
+
+// ownAuthoredCSSFiles are xoluman's own static CSS, not vendored code
+// or the Tailwind build output (which has no presence check of its own
+// today, generated fresh by `make css` every time rather than being a
+// static asset someone could accidentally leave out) — same reasoning
+// as ownAuthoredJSFiles: a page depending on one that's missing from
+// the embed fails silently otherwise.
+var ownAuthoredCSSFiles = []string{
+	"static/css/tabulator-dark-overrides.css",
+}
+
+func TestOwnAuthoredCSSFilesPresent(t *testing.T) {
+	for _, path := range ownAuthoredCSSFiles {
+		info, err := fs.Stat(Static, path)
+		if err != nil {
+			t.Errorf("%s: not present in the embedded FS: %v", path, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("%s: present but empty", path)
+		}
+	}
+}

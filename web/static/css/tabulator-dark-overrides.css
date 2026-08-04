@@ -1,0 +1,94 @@
+/*
+ * Tabulator dark-mode overrides — xoluman-authored, not vendored.
+ *
+ * Tabulator's vendored default theme (tabulator@6.5.2.min.css) has no
+ * CSS custom properties to hook into (confirmed by inspection — every
+ * color is a hardcoded hex value), and its own alternate "midnight"
+ * theme is a complete, separately-maintained stylesheet rather than a
+ * small set of overrides. Loading it would mean either shipping two
+ * full Tabulator stylesheets and swapping which one is active via JS,
+ * or accepting whatever visual differences beyond just color exist
+ * between Tabulator's own light/dark themes — a different theming
+ * mechanism from the rest of xoluman, which is built entirely around
+ * one `dark` class on <html> that every `dark:` Tailwind utility
+ * already responds to (theme.js sets it; tailwind.config.js's own
+ * `darkMode: 'class'`). This file extends that same single mechanism
+ * to Tabulator instead of introducing a second one, with colors drawn
+ * from xoluman's own Tailwind gray scale (gray-800/700/600/100) and
+ * indigo accent (indigo-600/500 — the same accent used for every
+ * primary button and link elsewhere in the app), not Tabulator's own
+ * default blue.
+ *
+ * A real gap this fixes, reported directly: the theme toggle existed
+ * but wasn't "uniformly observed in all the components" — this was
+ * one of them. See docs/KNOWN_ISSUES.md for the fuller account of
+ * what else this pass covered and why the gap existed in the first
+ * place (a note in modal.js's own history — dark-mode support was
+ * explicitly dropped as "not yet needed" well before the toggle
+ * existed to need it).
+ */
+
+.dark .tabulator {
+  background-color: #1f2937; /* gray-800 */
+  border-color: #374151; /* gray-700 */
+  color: #f3f4f6; /* gray-100 */
+}
+
+.dark .tabulator-header,
+.dark .tabulator-col,
+.dark .tabulator-footer {
+  background-color: #374151; /* gray-700 */
+  color: #f3f4f6; /* gray-100 */
+  border-color: #4b5563; /* gray-600 */
+}
+
+.dark .tabulator-col-resize-handle {
+  background-color: #4b5563; /* gray-600 */
+}
+
+.dark .tabulator-row {
+  background-color: #1f2937 !important; /* gray-800 */
+  color: #f3f4f6; /* gray-100 */
+}
+
+.dark .tabulator-row.tabulator-row-even {
+  background-color: #263244; /* between gray-800 and gray-700 — a subtle stripe, same relative contrast as the light theme's own row/row-even pair */
+}
+
+.dark .tabulator-row:hover {
+  background-color: #2d3b4f;
+}
+
+.dark .tabulator-cell {
+  border-right-color: #374151; /* gray-700 */
+}
+
+.dark .tabulator-row.tabulator-selected {
+  background-color: #4338ca !important; /* indigo-700 — a selected row needs to read clearly against the dark row background, one step darker than the indigo-600 accent used for interactive elements */
+  color: #ffffff;
+}
+
+.dark .tabulator-cell.tabulator-editing {
+  border-color: #6366f1; /* indigo-500 */
+  background-color: #1f2937; /* gray-800 */
+}
+
+.dark .tabulator-edit-list {
+  background-color: #1f2937; /* gray-800 */
+  border: 1px solid #374151; /* gray-700 */
+}
+
+.dark .tabulator-edit-list-item {
+  color: #f3f4f6; /* gray-100 */
+}
+
+.dark .tabulator-edit-list-item.active,
+.dark .tabulator-edit-list-item:hover {
+  background-color: #4f46e5; /* indigo-600 */
+  color: #ffffff;
+}
+
+.dark .tabulator-alert {
+  background-color: rgba(31, 41, 55, 0.9); /* gray-800 */
+  color: #f3f4f6; /* gray-100 */
+}

@@ -2,9 +2,27 @@
  * xoluman modal — trimmed from Seam AMS's SeamModal (web/static/js/app.js)
  * to the interaction pattern xoluman actually needs: a backdrop, a
  * title, and an htmx-loaded body. Dropped relative to the original:
- * display-adaptive 4K sizing, dark-mode detection, the fixed-footer
- * extraction step, and inline-script re-execution — none of which
- * xoluman's simple forms need yet.
+ * display-adaptive 4K sizing, the fixed-footer extraction step, and
+ * inline-script re-execution — none of which xoluman's simple forms
+ * need yet.
+ *
+ * Dark-mode awareness was ALSO dropped in that original trim (with a
+ * "not yet needed" note right here) and that was a real mistake once
+ * xoluman actually shipped a theme toggle — the CSS system-color
+ * keywords `Canvas`/`CanvasText` used in its place follow the OS/
+ * browser's own light-or-dark preference, not xoluman's explicit
+ * localStorage-backed choice (theme.js), so overriding the theme via
+ * the toggle button left every modal still following whatever the OS
+ * happened to be set to — a visible, reported inconsistency. Restored
+ * here using Seam's exact proven pattern (`document.documentElement.
+ * classList.contains('dark')`, checked once at build time — Seam's
+ * own SeamModal/SeamPopover never re-theme a modal that's already
+ * open either, so this matches that behaviour deliberately, not by
+ * oversight), with colours matching xoluman's own Tailwind gray scale
+ * (the same palette every `dark:` utility class elsewhere in the app
+ * already uses) rather than Seam's slate — a JS-computed style needs
+ * to look consistent with THIS app's own classes, not the app it was
+ * borrowed from.
  *
  * Usage (matches Seam's convention so the pattern transfers directly):
  *   <button hx-get="/connections/new" hx-target="#modal-body"
@@ -20,9 +38,15 @@ window.XModal = (function () {
   var _modal = null;
   var _onKey = null;
 
+  function _dark() {
+    return document.documentElement.classList.contains('dark');
+  }
+
   function _css(el, props) { Object.assign(el.style, props); }
 
   function _build() {
+    var dark = _dark();
+
     _backdrop = document.createElement('div');
     _css(_backdrop, {
       position: 'fixed', inset: '0',
@@ -33,7 +57,15 @@ window.XModal = (function () {
 
     _modal = document.createElement('div');
     _css(_modal, {
-      background: 'Canvas', color: 'CanvasText',
+      // Tailwind's gray-800/gray-100 (dark) and white/gray-900 (light)
+      // — the exact hex values already used throughout the rest of
+      // xoluman via `dark:bg-gray-900`, `dark:text-gray-100`, etc.
+      // gray-800 rather than gray-900 for the modal surface itself: a
+      // shade lighter than the page background gives the modal visual
+      // depth/separation from what's behind it, the same convention
+      // any elevated surface (a card, a dropdown) uses over a page.
+      background: dark ? '#1f2937' : '#ffffff',
+      color: dark ? '#f3f4f6' : '#111827',
       borderRadius: '8px',
       boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
       width: '32rem', maxWidth: 'calc(100vw - 2rem)',
@@ -43,7 +75,8 @@ window.XModal = (function () {
 
     var header = document.createElement('div');
     _css(header, {
-      padding: '0.9rem 1.1rem', borderBottom: '1px solid #8884',
+      padding: '0.9rem 1.1rem',
+      borderBottom: '1px solid ' + (dark ? '#374151' : '#e5e7eb'), // gray-700 / gray-200
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       flexShrink: '0',
     });
@@ -57,7 +90,7 @@ window.XModal = (function () {
     closeBtn.setAttribute('aria-label', 'Close');
     _css(closeBtn, {
       background: 'none', border: 'none', cursor: 'pointer',
-      fontSize: '1.3rem', lineHeight: '1', padding: '0.2rem 0.4rem',
+      color: 'inherit', fontSize: '1.3rem', lineHeight: '1', padding: '0.2rem 0.4rem',
     });
     closeBtn.addEventListener('click', function () { close(); });
     header.append(titleEl, closeBtn);

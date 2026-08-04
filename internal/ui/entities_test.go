@@ -834,6 +834,47 @@ func TestRefTargetsByField_SkipsEmptyTarget(t *testing.T) {
 	}
 }
 
+func TestEntitiesBasePath_EscapesBothSegments(t *testing.T) {
+	got := entitiesBasePath("My Server", "weird/type")
+	want := "/connections/My%20Server/entities/weird%2Ftype"
+	if got != want {
+		t.Fatalf("entitiesBasePath = %q, want %q", got, want)
+	}
+}
+
+func TestEntitiesHandler_Show_LinksAreEscapedForConnectionNameWithSpace(t *testing.T) {
+	// Real, confirmed bug this guards against: a connection name
+	// flowing unescaped into every href built from it. "My Server"
+	// (a completely ordinary thing to name a connection) rendered a
+	// literal, unescaped space directly into href values before this
+	// fix — plausibly the actual cause of "clicking any entity gives
+	// XOLU-ST004: Invalid ID," though that was never conclusively
+	// reproduced; this closes the class of bug regardless.
+	store := connstore.NewFileBackend(t.TempDir())
+	server := fakeXoluWithWidgets(t)
+	if _, err := store.Save(context.Background(), connstore.Connection{
+		ConnectionMeta: connstore.ConnectionMeta{Name: "My Server", BaseURL: server.URL, AuthMode: connstore.AuthNone},
+	}); err != nil {
+		t.Fatalf("seeding connection: %v", err)
+	}
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/My%20Server/entities/widgets", nil)
+	req.SetPathValue("name", "My Server")
+	req.SetPathValue("type", "widgets")
+	rec := httptest.NewRecorder()
+
+	h.Show(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, `href="/connections/My Server/`) {
+		t.Fatalf("body contains an unescaped space in a connection-name-derived href: %s", body)
+	}
+	if !strings.Contains(body, `href="/connections/My%20Server/`) {
+		t.Fatalf("body missing the properly-escaped connection name in hrefs: %s", body)
+	}
+}
+
 func TestEntitiesHandler_List_UnknownConnection(t *testing.T) {
 	h := NewEntitiesHandler(connstore.NewFileBackend(t.TempDir()))
 	req := httptest.NewRequest(http.MethodGet, "/connections/nope/entities", nil)

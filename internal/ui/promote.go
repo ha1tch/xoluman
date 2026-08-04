@@ -47,7 +47,7 @@ func (h *EntitiesHandler) PromotePreview(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 	body := promotePreviewBody(entityType, basePath, suggestion, string(schemaJSON), "")
 	WriteHTML(w, Page("Promote "+entityType, r.URL.Path, body))
 }
@@ -137,13 +137,13 @@ func (h *EntitiesHandler) Promote(w http.ResponseWriter, r *http.Request) {
 			writeUpstreamError(w, name, r.URL.Path, sErr)
 			return
 		}
-		basePath := "/connections/" + name + "/entities/" + entityType
+		basePath := entitiesBasePath(name, entityType)
 		body := promotePreviewBody(entityType, basePath, suggestion, schemaText, "Invalid JSON: "+err.Error())
 		WriteHTML(w, Page("Promote "+entityType, r.URL.Path, body))
 		return
 	}
 
-	basePath := "/connections/" + name + "/entities/" + entityType
+	basePath := entitiesBasePath(name, entityType)
 
 	switch r.PostForm.Get("mode") {
 	case "flex":
