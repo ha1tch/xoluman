@@ -26,7 +26,21 @@ import (
 // absent boolean field means an unchecked checkbox, which browsers omit
 // from form data entirely rather than sending false — this is handled
 // explicitly, not left as an accidental omission.
-func ParseFormValues(fields []client.FieldDef, form url.Values) (Values, Errors) {
+//
+// refTargets maps a ref field's name to its target entity type (see
+// internal/ui's refTargetsByField, built from EntitySchema.Refs) — a
+// ref field can only be correctly constructed with a known target,
+// since xolu requires the structured write shape
+// {"type":"REF","entity":"<target>","id":<int>}, confirmed directly
+// against a real server: a bare integer is rejected with XOLU-VL001
+// ("expected {type,entity,id}, got float64"). Pass nil when target
+// info isn't available (e.g. a schema-less/inferred field list, which
+// has no way to know a field is even a reference, let alone its
+// target) — a ref field with no entry in refTargets is treated as an
+// ordinary numeric field, which will fail xolu's own validation on
+// write with a clear error rather than xoluman silently sending
+// something wrong without saying so.
+func ParseFormValues(fields []client.FieldDef, form url.Values, refTargets map[string]string) (Values, Errors) {
 	values := make(Values, len(fields))
 	errs := make(Errors)
 
@@ -54,7 +68,19 @@ func ParseFormValues(fields []client.FieldDef, form url.Values) (Values, Errors)
 		}
 
 		switch {
+		case (f.Format == "ref" || f.Type == "ref") && refTargets[f.Name] != "":
+			id, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				errs[f.Name] = "Must be a valid ID."
+				continue
+			}
+			values[f.Name] = map[string]any{"type": "REF", "entity": refTargets[f.Name], "id": id}
 		case f.Format == "ref" || f.Type == "ref":
+			// No known target (schema-less/inferred, or a polymorphic
+			// ref with no single target type) — falls back to a bare
+			// numeric value. xolu will reject this on write with a
+			// clear validation error; that's the correct outcome here,
+			// not a silent guess at which entity type this points at.
 			v, err := strconv.ParseFloat(raw, 64)
 			if err != nil {
 				errs[f.Name] = "Must be a valid ID."

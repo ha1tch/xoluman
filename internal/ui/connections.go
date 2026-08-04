@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	mi "github.com/ha1tch/minty"
@@ -35,11 +36,12 @@ func init() {
 func RegisterConnectionsModule(reg *modules.Registry, store connstore.Store) {
 	conns := NewConnectionsHandler(store)
 	reg.Register(modules.Module{
-		ID: "connections", Label: "Connections", URL: "/connections",
+		ID: "connections", Label: "", URL: "/connections",
 		ActivePrefix: "/connections", Order: 0,
 		MountRoutes: func(mux *http.ServeMux) {
 			mux.HandleFunc("GET /connections", conns.List)
 			mux.HandleFunc("GET /connections/new", conns.NewForm)
+			mux.HandleFunc("POST /connections/new/test", conns.TestUnsaved)
 			mux.HandleFunc("POST /connections", conns.Create)
 			mux.HandleFunc("GET /connections/{name}/delete-confirm", conns.DeleteConfirm)
 			mux.HandleFunc("POST /connections/{name}/delete", conns.Delete)
@@ -95,18 +97,31 @@ func connectionsTable(conns []connstore.Connection) mi.H {
 	return func(b *mi.Builder) mi.Node {
 		rows := make([]mi.Node, len(conns))
 		for i, c := range conns {
-			rows[i] = connectionRow(b, c)
+			rows[i] = connectionRow(b, c, i)
 		}
 		columns := []string{"Name", "Base URL", "Auth", "Tenant", "Status", ""}
 		return Table(columns, rows, "No connections yet. Add one to get started.")(b)
 	}
 }
 
-func connectionRow(b *mi.Builder, c connstore.Connection) mi.Node {
+// connectionRow's status element ID uses the row index, not the raw
+// connection name — a real bug, not a hypothetical one: htmx's
+// hx-target is used as a literal CSS selector (document.querySelector),
+// and a connection name containing any CSS-special character (a period
+// is a very ordinary thing to have in a real name, e.g. "prod.local")
+// silently breaks the match. "#status-prod.local" parses as "id
+// status-prod AND class local", which the actual element (id
+// "status-prod.local", no class at all) never matches — querySelector
+// returns null, htmx's swap does nothing, with no error anywhere to
+// notice. Confirmed directly: creating a connection named "prod.local"
+// renders exactly that broken id/hx-target pair. A row index is always
+// CSS-selector-safe regardless of what the person names a connection.
+func connectionRow(b *mi.Builder, c connstore.Connection, index int) mi.Node {
 	tenant := c.Tenant
 	if tenant == "" {
 		tenant = "—"
 	}
+	statusID := "status-" + strconv.Itoa(index)
 	td := "px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300"
 	deleteConfirmURL := "/connections/" + c.Name + "/delete-confirm"
 	return b.Tr(mi.ID("conn-row-"+c.Name),
@@ -114,14 +129,16 @@ func connectionRow(b *mi.Builder, c connstore.Connection) mi.Node {
 		b.Td(mi.Class(td), c.BaseURL),
 		b.Td(mi.Class(td), string(c.AuthMode)),
 		b.Td(mi.Class(td), tenant),
-		b.Td(mi.Class(td), mi.ID("status-"+c.Name), "untested"),
+		b.Td(mi.Class(td), mi.ID(statusID), "untested"),
 		b.Td(mi.Class(td),
 			b.Div(mi.Class("flex gap-2"),
 				b.A(mi.Href("/connections/"+c.Name+"/entities"), mi.Class(btnSecondary), "Entities"),
+				b.A(mi.Href("/connections/"+c.Name+"/blobs"), mi.Class(btnSecondary), "Blobs"),
+				b.A(mi.Href("/connections/"+c.Name+"/query"), mi.Class(btnSecondary), "Query"),
 				b.Button(
 					mi.Type("button"), mi.Class(btnSecondary),
 					mi.HxPost("/connections/"+c.Name+"/test"),
-					mi.HxTarget("#status-"+c.Name),
+					mi.HxTarget("#"+statusID),
 					mi.HxSwap("innerHTML"),
 					"Test",
 				),
@@ -182,8 +199,21 @@ func connectionFormBody(formErr string, values url.Values) mi.H {
 				b.Label(mi.For("tenant"), mi.Class(formLabelClass), "Tenant (optional)"),
 				b.Input(mi.Type("text"), mi.ID("tenant"), mi.Name("tenant"), mi.Value(get("tenant")), mi.Class(formInputClass)),
 
-				b.Div(mi.Class("mt-6"),
+				b.Div(mi.Class("mt-6 flex items-center gap-3"),
 					b.Button(mi.Type("submit"), mi.Class(btnPrimary), "Save connection"),
+					// type="button", not "submit" — this must fire its
+					// own htmx request against the form's current
+					// values (hx-include), not trigger the form's real
+					// POST /connections navigation. Nothing is saved;
+					// see TestUnsaved.
+					b.Button(mi.Type("button"), mi.Class(btnSecondary),
+						mi.HxPost("/connections/new/test"),
+						mi.HxInclude("closest form"),
+						mi.HxTarget("#new-conn-status"),
+						mi.HxSwap("innerHTML"),
+						"Test before saving",
+					),
+					b.Span(mi.ID("new-conn-status")),
 				),
 			),
 		)
@@ -202,15 +232,7 @@ func (h *ConnectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn := connstore.Connection{
-		ConnectionMeta: connstore.ConnectionMeta{
-			Name:     r.PostForm.Get("name"),
-			BaseURL:  r.PostForm.Get("base_url"),
-			AuthMode: connstore.AuthMode(r.PostForm.Get("auth_mode")),
-			Tenant:   r.PostForm.Get("tenant"),
-		},
-		Token: r.PostForm.Get("token"),
-	}
+	conn := connectionFromForm(r.PostForm)
 
 	if _, err := h.store.Save(r.Context(), conn); err != nil {
 		msg := friendlySaveError(err)
@@ -220,6 +242,48 @@ func (h *ConnectionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/connections", http.StatusSeeOther)
+}
+
+// connectionFromForm builds a Connection from submitted form values —
+// shared by Create (which saves it) and TestUnsaved (which doesn't),
+// so the two never parse the same fields differently.
+func connectionFromForm(form url.Values) connstore.Connection {
+	return connstore.Connection{
+		ConnectionMeta: connstore.ConnectionMeta{
+			Name:     form.Get("name"),
+			BaseURL:  form.Get("base_url"),
+			AuthMode: connstore.AuthMode(form.Get("auth_mode")),
+			Tenant:   form.Get("tenant"),
+		},
+		Token: form.Get("token"),
+	}
+}
+
+// TestUnsaved tests connectivity using the form's current field values
+// directly — no saved connection required, so a person can verify a
+// connection actually works before committing to saving it, from
+// inside the New Connection modal. Never touches the store.
+func (h *ConnectionsHandler) TestUnsaved(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		WriteFragment(w, statusFragment(false, "could not read the form"))
+		return
+	}
+
+	conn := connectionFromForm(r.PostForm)
+	if conn.BaseURL == "" {
+		WriteFragment(w, statusFragment(false, "enter a base URL first"))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	c := xoluext.BuildClient(conn)
+	if err := c.Health(ctx); err != nil {
+		WriteFragment(w, statusFragment(false, err.Error()))
+		return
+	}
+	WriteFragment(w, statusFragment(true, "ok"))
 }
 
 func friendlySaveError(err error) string {

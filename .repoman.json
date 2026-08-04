@@ -1,0 +1,12 @@
+{
+  "version_targets": [
+    {
+      "file": "docs/TRACKING.md",
+      "match": "^Version: (.+)$"
+    },
+    {
+      "file": "docs/KNOWN_ISSUES.md",
+      "match": "^Version: (.+)$"
+    }
+  ]
+}

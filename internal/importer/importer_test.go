@@ -21,7 +21,7 @@ func widgetFields() []client.FieldDef {
 
 func TestParseCSV_ValidRows(t *testing.T) {
 	csv := "name,count,active\nFirst,3,on\nSecond,7,\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestParseCSV_ValidRows(t *testing.T) {
 
 func TestParseCSV_UnknownColumnIgnored(t *testing.T) {
 	csv := "name,mystery_column\nFirst,whatever\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestParseCSV_UnknownColumnIgnored(t *testing.T) {
 
 func TestParseCSV_MissingRequiredFieldErrors(t *testing.T) {
 	csv := "name,count\n,5\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestParseCSV_MissingRequiredFieldErrors(t *testing.T) {
 
 func TestParseCSV_RaggedRowShorterThanHeader(t *testing.T) {
 	csv := "name,count,active\nOnlyName\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestParseCSV_RaggedRowShorterThanHeader(t *testing.T) {
 }
 
 func TestParseCSV_HeaderOnlyYieldsNoRows(t *testing.T) {
-	rows, err := ParseCSV(strings.NewReader("name,count,active\n"), widgetFields())
+	rows, err := ParseCSV(strings.NewReader("name,count,active\n"), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestParseCSV_HeaderOnlyYieldsNoRows(t *testing.T) {
 }
 
 func TestParseCSV_EmptyFileYieldsNoRows(t *testing.T) {
-	rows, err := ParseCSV(strings.NewReader(""), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(""), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestParseCSV_EmptyFileYieldsNoRows(t *testing.T) {
 
 func TestParseCSV_RowIndexIs1Based(t *testing.T) {
 	csv := "name\nFirst\nSecond\nThird\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestParseCSV_RowIndexIs1Based(t *testing.T) {
 func TestParseCSV_BooleanTrueValues(t *testing.T) {
 	for _, val := range []string{"true", "TRUE", "1", "yes", "Y", "on"} {
 		csv := "name,active\nX," + val + "\n"
-		rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+		rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 		if err != nil {
 			t.Fatalf("ParseCSV(%q): %v", val, err)
 		}
@@ -130,7 +130,7 @@ func TestParseCSV_BooleanTrueValues(t *testing.T) {
 func TestParseCSV_BooleanFalseValues(t *testing.T) {
 	for _, val := range []string{"false", "FALSE", "0", "no", "N", "off", ""} {
 		csv := "name,active\nX," + val + "\n"
-		rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+		rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 		if err != nil {
 			t.Fatalf("ParseCSV(%q): %v", val, err)
 		}
@@ -142,7 +142,7 @@ func TestParseCSV_BooleanFalseValues(t *testing.T) {
 
 func TestParseCSV_BooleanUnrecognisedValueErrors(t *testing.T) {
 	csv := "name,active\nX,maybe\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestParseCSV_BooleanUnrecognisedValueErrors(t *testing.T) {
 func TestParseCSV_BooleanColumnAbsentFromHeaderOmitsField(t *testing.T) {
 	// Distinct from an empty cell: the column isn't in the file at all.
 	csv := "name\nX\n"
-	rows, err := ParseCSV(strings.NewReader(csv), widgetFields())
+	rows, err := ParseCSV(strings.NewReader(csv), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseCSV: %v", err)
 	}
@@ -166,9 +166,88 @@ func TestParseCSV_BooleanColumnAbsentFromHeaderOmitsField(t *testing.T) {
 	}
 }
 
+func TestParseCSV_RefFieldKnownTarget_BuildsStructuredWriteShape(t *testing.T) {
+	fields := []client.FieldDef{{Name: "name", Type: "string", Required: true}, {Name: "author_id", Type: "integer", Format: "ref"}}
+	csv := "name,author_id\nHello,7\n"
+	rows, err := ParseCSV(strings.NewReader(csv), fields, map[string]string{"author_id": "users"})
+	if err != nil {
+		t.Fatalf("ParseCSV: %v", err)
+	}
+	if !rows[0].OK() {
+		t.Fatalf("rows[0].Errors = %v, want none", rows[0].Errors)
+	}
+	got, ok := rows[0].Values["author_id"].(map[string]any)
+	if !ok {
+		t.Fatalf("Values[author_id] = %v (%T), want a structured REF map", rows[0].Values["author_id"], rows[0].Values["author_id"])
+	}
+	if got["type"] != "REF" || got["entity"] != "users" || got["id"] != int64(7) {
+		t.Fatalf("Values[author_id] = %+v, want {type:REF, entity:users, id:7}", got)
+	}
+}
+
+func TestParseCSV_RefFieldNoKnownTarget_FallsBackToBareNumber(t *testing.T) {
+	fields := []client.FieldDef{{Name: "name", Type: "string", Required: true}, {Name: "author_id", Type: "integer", Format: "ref"}}
+	csv := "name,author_id\nHello,7\n"
+	rows, err := ParseCSV(strings.NewReader(csv), fields, nil)
+	if err != nil {
+		t.Fatalf("ParseCSV: %v", err)
+	}
+	if rows[0].Values["author_id"] != float64(7) {
+		t.Fatalf("Values[author_id] = %v, want float64(7) when no target is known", rows[0].Values["author_id"])
+	}
+}
+
+func TestParseJSON_RefFieldKnownTarget_NormalizesBareNumber(t *testing.T) {
+	fields := []client.FieldDef{{Name: "name", Type: "string", Required: true}, {Name: "author_id", Type: "integer", Format: "ref"}}
+	body := `[{"name":"Hello","author_id":7}]`
+	rows, err := ParseJSON(strings.NewReader(body), fields, map[string]string{"author_id": "users"})
+	if err != nil {
+		t.Fatalf("ParseJSON: %v", err)
+	}
+	got, ok := rows[0].Values["author_id"].(map[string]any)
+	if !ok {
+		t.Fatalf("Values[author_id] = %v (%T), want a structured REF map", rows[0].Values["author_id"], rows[0].Values["author_id"])
+	}
+	if got["type"] != "REF" || got["entity"] != "users" || got["id"] != int64(7) {
+		t.Fatalf("Values[author_id] = %+v, want {type:REF, entity:users, id:7}", got)
+	}
+}
+
+func TestParseJSON_RefFieldKnownTarget_AlreadyStructuredPassesThroughUnchanged(t *testing.T) {
+	fields := []client.FieldDef{{Name: "name", Type: "string", Required: true}, {Name: "author_id", Type: "integer", Format: "ref"}}
+	body := `[{"name":"Hello","author_id":{"type":"REF","entity":"users","id":7}}]`
+	rows, err := ParseJSON(strings.NewReader(body), fields, map[string]string{"author_id": "users"})
+	if err != nil {
+		t.Fatalf("ParseJSON: %v", err)
+	}
+	got, ok := rows[0].Values["author_id"].(map[string]any)
+	if !ok {
+		t.Fatalf("Values[author_id] = %v (%T), want a structured REF map", rows[0].Values["author_id"], rows[0].Values["author_id"])
+	}
+	if got["entity"] != "users" || got["id"] != float64(7) {
+		// float64 here (not int64) — this value was never touched by
+		// normalizeRefValue at all, it's exactly what json.Decode
+		// produced from the input, which is the whole point of this
+		// test: an already-correct shape must not be altered.
+		t.Fatalf("Values[author_id] = %+v, want the original structured value untouched", got)
+	}
+}
+
+func TestParseJSON_RefFieldNoKnownTarget_LeftAsWritten(t *testing.T) {
+	fields := []client.FieldDef{{Name: "name", Type: "string", Required: true}, {Name: "author_id", Type: "integer", Format: "ref"}}
+	body := `[{"name":"Hello","author_id":7}]`
+	rows, err := ParseJSON(strings.NewReader(body), fields, nil)
+	if err != nil {
+		t.Fatalf("ParseJSON: %v", err)
+	}
+	if rows[0].Values["author_id"] != float64(7) {
+		t.Fatalf("Values[author_id] = %v, want the bare number left untouched when no target is known", rows[0].Values["author_id"])
+	}
+}
+
 func TestParseJSON_ValidRows(t *testing.T) {
 	body := `[{"name":"First","count":3,"active":true},{"name":"Second","count":7,"active":false}]`
-	rows, err := ParseJSON(strings.NewReader(body), widgetFields())
+	rows, err := ParseJSON(strings.NewReader(body), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseJSON: %v", err)
 	}
@@ -182,7 +261,7 @@ func TestParseJSON_ValidRows(t *testing.T) {
 
 func TestParseJSON_MissingRequiredFieldErrors(t *testing.T) {
 	body := `[{"count":5}]`
-	rows, err := ParseJSON(strings.NewReader(body), widgetFields())
+	rows, err := ParseJSON(strings.NewReader(body), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseJSON: %v", err)
 	}
@@ -193,7 +272,7 @@ func TestParseJSON_MissingRequiredFieldErrors(t *testing.T) {
 
 func TestParseJSON_NullRequiredFieldErrors(t *testing.T) {
 	body := `[{"name":null,"count":5}]`
-	rows, err := ParseJSON(strings.NewReader(body), widgetFields())
+	rows, err := ParseJSON(strings.NewReader(body), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseJSON: %v", err)
 	}
@@ -203,14 +282,14 @@ func TestParseJSON_NullRequiredFieldErrors(t *testing.T) {
 }
 
 func TestParseJSON_MalformedJSONErrors(t *testing.T) {
-	_, err := ParseJSON(strings.NewReader("{not valid json"), widgetFields())
+	_, err := ParseJSON(strings.NewReader("{not valid json"), widgetFields(), nil)
 	if err == nil {
 		t.Fatal("ParseJSON: want an error for malformed JSON")
 	}
 }
 
 func TestParseJSON_EmptyArrayYieldsNoRows(t *testing.T) {
-	rows, err := ParseJSON(strings.NewReader("[]"), widgetFields())
+	rows, err := ParseJSON(strings.NewReader("[]"), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseJSON: %v", err)
 	}
@@ -221,7 +300,7 @@ func TestParseJSON_EmptyArrayYieldsNoRows(t *testing.T) {
 
 func TestParseJSON_RowIndexIs1Based(t *testing.T) {
 	body := `[{"name":"A"},{"name":"B"}]`
-	rows, err := ParseJSON(strings.NewReader(body), widgetFields())
+	rows, err := ParseJSON(strings.NewReader(body), widgetFields(), nil)
 	if err != nil {
 		t.Fatalf("ParseJSON: %v", err)
 	}

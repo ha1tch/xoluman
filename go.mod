@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/ha1tch/minty v0.2.1
-	github.com/ha1tch/xolu v0.16.16
+	github.com/ha1tch/xolu v0.26.0
 	github.com/zalando/go-keyring v0.2.8
 )
 

@@ -4,6 +4,224 @@ Append-only, newest first. Closed items are moved here verbatim from
 `TRACKING.md`, stamped with closing version and date, per the closure
 procedure.
 
+## [0.6.13] T-11 — Bulk/grid data editing: vendored Tabulator (vanilla JS) wrapped in a Lit shell (v0.6.13, 2026-08-04)
+
+**Process correction, not new work.** `internal/ui/grid.go`, `grid_test.go`, and `web/static/js/grid-editor.js` were actually built, tested (11 tests), and verified end-to-end against real xolu in an earlier session pass — but the closure procedure (this record, the register update, a version bump, a changelog entry) was never run at the time; the work landed silently inside a larger response without its own checkpoint. Caught while reviewing the register before continuing further work. Re-verified fresh here (grid page loads with real vendored assets, `grid-data` GET reflects real seeded data, `grid-data` POST genuinely `Patch`es — `_version` incremented, `qty` changed 1→99) before closing, not just trusting the earlier record.
+
+
+Theme: grid-editor · closed 0.6.13 · 2026-08-04
+
+
+Confirmed 2026-08-03: Glide Data Grid is React-only (peer dependency on React 16-19, no vanilla build — verified, not assumed) and was ruled out on that basis, matching the project's no-React rule. Tabulator (github.com/olifolkerd/tabulator, MIT licensed) is the alternative — genuinely vanilla JS, ships as a plain JS+CSS pair (dist/js/tabulator.min.js + dist/css/tabulator.min.css), vendorable exactly like htmx and Lit already are. Wrapped in a Lit shell per Horacio's suggestion, this reuses the same architecture already established for the FSM editor and planned for the graph editor: a Lit shell (toolbar/theming/lifecycle) around a swappable, framework-agnostic engine. All three of xoluman's richer embedded widgets (FSM editor, graph editor, grid editor) end up sharing one consistent pattern rather than three different ones. Distinct from T-07: T-07 is a single-entity schema-driven form; this is bulk editing across many rows/cells of one entity type at once (paste, keyboard nav, multi-cell selection) — a materially bigger feature, correctly sequenced after T-07 ships.
+
+**Design pass, 2026-08-03:**
+
+- **Additive, not a replacement.** The grid is a second view of an entity type, reached from a "Grid view" link on the existing paginated list (T-10) — not a replacement for it. The simple list+form flow stays the default for occasional single-row edits; the grid is specifically for editing many rows quickly (paste, fill-down, keyboard nav).
+- **Scope: bulk edit only, not bulk create/delete.** Creating and deleting rows already have homes — the entity form (T-07) and import (T-05) for creation, the existing delete-confirm flow for removal. The grid's job is editing values across many existing rows at once. Keeping create/delete out of it avoids duplicating either.
+- **Real gotcha caught at design time, not as a data-loss bug later: writes must be PATCH, never PUT.** The grid can't reasonably show every field of a wide schema as a spreadsheet column — some columns will be omitted for readability, the same way T-10's list preview caps at 4. If a save sent `Client.Update` (a full-document PUT), any field not shown as a grid column would be silently dropped from the document on save. `Client.Patch` (partial update, PATCH) is the only correct choice here — it only touches the fields actually present in what's sent, exactly matching what a partial-column grid needs. This must not be revisited casually later; it's the one design fact that would turn "edit conveniently" into "silently delete data."
+- **Column set:** every non-object/array scalar field from the schema (unlike the list preview's 4-column cap, which exists for glanceability, not editability — a grid meant for bulk editing should show what there is to edit). Object/array fields excluded, same reasoning as everywhere else in xoluman: not suited to a spreadsheet cell, formengine's own edit form is where those live. Ref fields editable by raw target ID, same v1 limitation as elsewhere — no lookup-by-name picker yet.
+- **Data transfer, client ↔ server:** a dedicated JSON endpoint per entity type (`GET .../grid-data`) that Tabulator's own remote-pagination mode (`ajaxURL` + `pagination: "remote"`) consumes directly — reusing `Client.List`'s existing pagination rather than loading an entire (potentially large) entity type into the browser at once. Saves batch through a matching `POST .../grid-data` accepting per-row partial changes, executing one `Patch` per row, independently — same "one row's failure doesn't affect another's" philosophy already established for import (T-05), reported back the same way.
+- **Real limitation, stated plainly:** the Lit+Tabulator component itself is client-side interactive JavaScript — this sandbox has no real browser to click into, drag-select cells in, or paste into. What gets verified here is everything that can be: the JSON API endpoints against real xolu (fully Go-testable, same rigor as everything else), asset vendoring and serving, and that the page assembles and the script loads without error. Actual interactive grid behaviour — editing, keyboard nav, the save flow's real UX — needs Horacio's own hands, the same category of gap as T-04's live-keyring guard.
+
+Cross-ref: CHANGELOG 0.6.13.
+
+## [0.6.12] T-12 — Query editor: CodeMirror 6 for all three query modes (OQL/Sulpher/REST), Lit shell (v0.6.12, 2026-08-04)
+
+Theme: query-editor · closed 0.6.12 · 2026-08-04
+
+
+Confirmed 2026-08-03 with Horacio's precise language facts: OQL is a subset of T-SQL, Sulpher is almost exactly openCypher9. Shiki was the original candidate but is superseded — it's a highlighter only (codeToHtml, no cursor/typing/selection), not an editor, and requires vendoring the Oniguruma WASM binary alongside it. CodeMirror 6 (MIT, github.com/codemirror, genuinely vanilla JS core — 'import {EditorView, basicSetup} from "codemirror"', no framework needed) is the actual editable component, and purpose-built official language packages cover both DSLs better than Shiki's generic/community grammars would have: OQL uses @codemirror/lang-sql's built-in MSSQL dialect (confirmed via its changelog's explicit MSSQL keyword/builtin coverage, and docs on MSSQL-style bracket-quoted identifiers) -- safe to use the T-SQL dialect for a T-SQL subset, since anything OQL uses is valid T-SQL by construction, zero custom grammar work needed. Sulpher uses @neo4j-cypher/codemirror (Apache-2.0, framework-agnostic base package -- the React wrapper @neo4j-cypher/react-codemirror is separate and not needed), built on Neo4j's real ANTLR4 Cypher grammar plus semantic analysis rather than a regex-based TextMate approximation, and it ships autocompletion, linting, and formatting already, not just highlighting. REST query bodies use @codemirror/lang-json (official, MIT). Net effect: Shiki and its WASM dependency are dropped entirely -- CodeMirror alone, three official per-language packages, better accuracy on both real DSLs than the generic grammars Shiki would have supplied. Wrapped in a Lit shell, this is the fourth instance of the same architecture already used for the FSM editor, planned for the graph editor, and T-11's grid editor: a Lit shell (toolbar/theming/lifecycle) around a swappable, framework-agnostic engine -- one consistent pattern across every rich embedded widget in xoluman rather than four different ones.
+
+Cross-ref: CHANGELOG 0.6.12.
+
+## [0.6.10] T-09 — Blob browser: virtual hierarchy over the flat key store (v0.6.10, 2026-08-04)
+
+Theme: blob-browser · closed 0.6.10 · 2026-08-04
+
+
+**Note, 2026-08-04:** the "After T-01" blocker this item originally
+carried is stale — T-01 was discarded (see its RESOLVED.md correction
+note) and its actual ask was folded into T-13, now closed by the xolu
+team's v0.25.0 delivery. T-18 was filed as a near-duplicate restating
+this same unblocking; closed as merged back in here rather than left
+as a second open item for the same work. One more thing worth knowing,
+reconfirmed against v0.25.0's validateBlobKey while checking the
+delivery: leading `.` and the literal keys `.`/`..` are also reserved,
+not just `/` and `\`.
+
+xolu's blob keys cannot contain `/` — confirmed this is enforced even
+on the S3-compatible surface (`pkg/server/blob_s3_handlers.go` calls
+straight through to the same `blob.Store.Put`/`validateKey` as the
+native endpoint), so no path in xolu accepts real hierarchical keys.
+The hierarchy is therefore a xoluman-only presentation convention, not
+anything xolu is aware of.
+
+**Delimiter:** `:` (colon) used *within* an otherwise-flat key —
+`photos:2026:vacation.jpg` — translated to `photos / 2026 /
+vacation.jpg` only at the xoluman UI boundary. Never written to xolu
+with any other meaning; the stored key is still one opaque flat string
+as far as xolu is concerned.
+
+**Listing a folder:** `GET /api/v1/blob?prefix=photos:2026:` (native,
+already supported, no xolu changes needed) — split each returned key on
+`:` after stripping the prefix, first remaining segment is one
+directory level.
+
+**Empty folders and drift, backed by a `xoluman_blob_folder` entity**
+(confirmed with Horacio 2026-08-03 — uses xolu's own entity/REF
+mechanism rather than a xoluman-local index, so it travels with the
+target instance's own backup/export and is visible to any other client
+of that instance, not just xoluman):
+
+| Field | Type | Purpose |
+|---|---|---|
+| `name` | string | This level's own segment name only, not a full path |
+| `parent` | `REF → xoluman_blob_folder`, nullable | Root folders have no parent; the REF is the graph edge, created automatically |
+| `explicit` | bool | `true`: a person deliberately created an empty folder. `false`: xoluman auto-materialized it because blobs were observed under that prefix |
+
+No `path` field — deliberately. Full path is reconstructed by walking
+`parent` REFs on demand, so renaming a folder touches exactly one
+entity's `name`, never a cascade of stored-path rewrites on every
+descendant.
+
+**Reconciliation (this is the actual "sync"):** browsing into a folder
+runs the blob prefix scan and an entity query for `parent = this
+folder` in parallel, then merges: a blob-scan segment with no matching
+entity gets one materialized now (`explicit: false`) — this heals
+folders created by anything that bypassed xoluman entirely (raw curl
+against the blob API). An `explicit: false` entity that loses its last
+blob and has no child folders is garbage-collected, since it only ever
+existed as a side effect of content being there. An `explicit: true`
+entity persists regardless of contents. The entity store is never the
+sole source of truth for anything populated — the blob scan always is;
+the entity only carries what the blob store structurally cannot: empty
+folders, and the "a person meant this to exist" bit.
+
+**Move/rename:** no native move endpoint on xolu; content is SHA-256
+deduplicated, so moving a file is `Put` under the new key + `Delete`
+the old key alias — cheap, no data actually re-copied. Moving a folder
+means doing that for every blob under its prefix (no cheaper option
+exists) plus updating the one folder entity's `parent`.
+
+Cross-ref: CHANGELOG 0.6.10.
+
+## [0.6.9] T-20 — Schema promotion UI — new entity-browser feature (preview + PromoteFlex/PromoteStrict) (v0.6.9, 2026-08-04)
+
+Theme: entity-browser · closed 0.6.9 · 2026-08-04
+
+
+Not requested by Horacio originally -- xolu team built it as a bonus alongside ListEntities, same v0.25.0 release. GetSchemaSuggestion(ctx, type) previews a heuristic-inferred schema with per-field confidence/reasoning, no side effects. PromoteFlex(ctx, type, schema) is fast/synchronous but does not migrate pre-existing rows into the new adapted table (check result.Warning). PromoteStrict(ctx, type, schema) validates every existing row first and only migrates if all pass, atomically -- rejection is a normal PromoteJobStatus (PromoteJobRejected), not a Go error, with job.Failures naming exactly which rows and why. Pass nil schema to either Promote method to auto-infer rather than using a suggestion. Natural UI: on the entity type list (once it shows ListEntities' has_schema flag), a schemaless row gets a 'Promote to schema' action -> preview via GetSchemaSuggestion, editable, then PromoteStrict by default (PromoteFlex as an explicit opt-in with the data-loss warning surfaced, not the default).
+
+Cross-ref: CHANGELOG 0.6.9.
+
+## [0.6.8] T-16 — Schema-less entity editing: EditForm/Update/NewForm/Create still assume a registered schema (v0.6.8, 2026-08-04)
+
+Theme: entity-browser · closed 0.6.8 · 2026-08-04
+
+
+Follow-on from the Show/List fix (v0.6.5, CHANGELOG) for 'schemas are not obligatory in xolu' -- that fix covers browsing (Show infers preview columns from fetched data when no schema exists; List gained a jump-by-name bypass for discovery). EditForm/Update/NewForm/Create were not touched and still call GetEntitySchema as a hard prerequisite, so a schema-less entity type can be viewed in the list but not edited or created through the generic form yet. Real fix for EditForm/Update: when GetEntitySchema 404s but the target document itself loads fine, derive the field list from that document's own keys/JSON value types (the same inferFieldsFromEntities approach Show now uses) rather than failing. NewForm/Create is harder -- a brand new document has nothing to infer from if the type has zero existing rows; reasonable v1 answer is a clear message rather than a silent failure when there's truly nothing to infer from, falling back to inferring from an existing document when at least one exists.
+
+Cross-ref: CHANGELOG 0.6.8.
+
+## [0.6.7] T-03 — Add a minimal Raw request method to `xolu/pkg/client` (v0.6.7, 2026-08-04)
+
+**Resolved by the xolu team, not by xoluman code.** `Client.Raw` shipped in xolu v0.25.0, confirmed directly against `pkg/client/raw.go` — matches this request closely, no reinterpretation. Closing the ask; the actual REST-console feature that needs it is separate, still open, tracked under T-12.
+
+
+Theme: xolu-client-ext · closed 0.6.7 · 2026-08-04
+
+
+`Client.do`/`doURL` are unexported. The REST console needs to issue
+arbitrary method+path+body requests using the connection's already-
+configured auth, so a small public `Raw(ctx, method, path, body)
+(status int, body []byte, err error)` on the client would cover it —
+same reasoning as T-01/T-02, keep auth/retry logic in one place.
+
+**Reframed 2026-08-03:** not xoluman-implementable, same correction as
+T-02 — this is a request to the xolu team (T-13,
+`docs/xolu-requests.md`), not something built directly into Horacio's
+local checkout.
+
+Cross-ref: CHANGELOG 0.6.7.
+
+## [0.6.7] T-02 — Add Export method to `xolu/pkg/client` (v0.6.7, 2026-08-04)
+
+**Resolved by the xolu team, not by xoluman code.** `Client.Export(ctx, w)` shipped in xolu v0.25.0 — redesigned from the original synchronous-stream ask into an async, tenant-scoped, blob-backed mechanism (the old `GET /api/v1/export` had zero tenant scoping — a real security problem, not a style choice), but the caller-facing experience matches what was originally requested: one call, hides the polling. Closing the ask; the actual backup/export UI feature that needs it is separate, still open, tracked under T-22.
+
+
+Theme: xolu-client-ext · closed 0.6.7 · 2026-08-04
+
+
+`GET /api/v1/export` streams a zip (manifest + database file + optional
+`graph.json`). Needs a streaming-friendly client method (`io.Writer`
+target, not a buffered `[]byte` return, given arbitrary DB size per
+`EXPORT_API.md`'s own caveat about streaming without a temp file).
+
+**Reframed 2026-08-03:** not xoluman-implementable — changes to
+`xolu/pkg/client` are requests to the xolu team (see T-13,
+`docs/xolu-requests.md`), not something this project writes into
+Horacio's local xolu checkout itself. While reviewing this for the
+request doc, found `EXPORT_API.md` itself is stale: it documents the
+database file as `entities.db` / manifest key `entities_file`, and a
+`graph_files` array key that doesn't exist. Worth flagging to the xolu
+team as a doc bug regardless of when/whether the client method lands.
+
+Cross-ref: CHANGELOG 0.6.7.
+
+## [0.6.7] T-19 — REST console (part of T-12) — now genuinely unblocked by xolu v0.25.0's Raw method (v0.6.7, 2026-08-04)
+
+**Closed as a duplicate, not as completed work.** This restated an unblocking already captured in T-12 itself (updated in the same pass). No REST console code shipped — that work is still open, tracked under T-12.
+
+
+Theme: query-editor · closed 0.6.7 · 2026-08-04
+
+
+T-12's REST mode needed a generic authenticated-request capability the official client didn't expose (do/doURL/doOnce are unexported) -- that was the whole reason T-03 was filed. xolu v0.25.0 shipped Client.Raw(ctx, method, path, contentType, body) -- confirmed directly against pkg/client/raw.go: no tenant-prefixing (caller controls the exact path), no structured-error decoding (caller inspects StatusCode directly), single-attempt. Exactly the shape needed. Not started this session. Note for whoever builds this: xoluext/fsmdef.go's hand-rolled raw-HTTP helpers (built before Raw existed, for the FSM def write methods that still aren't in the official client) could be refactored to call c.Raw() internally instead of duplicating auth-header/URL-building logic, while keeping fsmdef.go's own FSM-specific structured-error decoding on top -- worth doing as a cleanup, not urgent.
+
+Cross-ref: CHANGELOG 0.6.7.
+
+## [0.6.7] T-18 — Blob browser (T-09) — now genuinely unblocked by xolu v0.25.0's Blob client methods (v0.6.7, 2026-08-04)
+
+**Closed as a duplicate, not as completed work.** This restated an unblocking already captured in T-09 itself (updated in the same pass). No blob browser code shipped — that work is still open, tracked under T-09.
+
+
+Theme: blob-browser · closed 0.6.7 · 2026-08-04
+
+
+Original T-09 design (virtual hierarchy over the flat key store, colon as in-key delimiter since / and \\ are xolu-reserved -- reconfirmed against v0.25.0's validateBlobKey, also reserves leading '.' and the literal '.'/'..' keys, worth knowing) is unblocked now that BlobPut/BlobGet/BlobHead/BlobDelete/BlobList/BlobUsage exist in the real client. Not started this session -- filed so it does not silently fall off the list now that its blocker is gone.
+
+Cross-ref: CHANGELOG 0.6.7.
+
+## [0.6.7] T-17 — Replace T-16 jump-by-name workaround with real ListEntities discovery (v0.6.7, 2026-08-04)
+
+Theme: entity-browser · closed 0.6.7 · 2026-08-04
+
+
+xolu v0.25.0 shipped Client.ListEntities(ctx, includeGraph) -- lists every entity type with actual data, schemaless or not, with row counts/schema status/adapted-table info. This is the real, proper fix for what T-16's jump-by-name form patched around. Replace entities.List's discovery: show every entry from ListEntities (not just ListEntityTypes' schema-only view), with count and a has-schema indicator per row; keep the jump-by-name form as a fallback for typing an exact name directly rather than removing it outright, since it's still marginally faster for a known name. This also makes Show's own per-request schema-fetch-then-infer-on-404 fallback (T-16's fix) no longer strictly necessary for DISCOVERY, though it's still correct defense for actually viewing a schemaless type's rows -- keep that part as is.
+
+Cross-ref: CHANGELOG 0.6.7.
+
+## [0.6.7] T-13 — External request filed with the xolu team: client-library gaps, Health() auth gap, schema registration (v0.6.7, 2026-08-04)
+
+Theme: xolu-client-ext · closed pending · 2026-08-04
+
+
+Filed 2026-08-03 as docs/xolu-requests.md, a plain-language request document, not code. Corrects the mistake recorded in T-01's RESOLVED.md entry: xolu/pkg/client's blob and export methods were written directly into Horacio's local xolu checkout without asking, then discarded at his instruction once caught. xoluman does not modify xolu directly regardless of the go.mod replace directive making a local copy buildable -- changes to xolu are requests to the xolu team. See docs/KNOWN_ISSUES.md's recorded decision. The request document covers, reviewed comprehensively rather than just the blob/export items already in flight: Blob primitive client methods (blocks T-09 and the originally-scoped blob browser feature), a streaming Export method (blocks the backup feature; also flags EXPORT_API.md's stale manifest-shape documentation), a minimal Raw request method (blocks T-12's REST query console), a client wrapper for the existing but unwrapped POST /api/v1/schema/{entity} registration endpoint (needed for T-09's xoluman_blob_folder entity to get proper validation and to browse/edit correctly through xoluman's own generic data editor), and a functional correctness finding: Client.Health() never applies the configured auth header, confirmed by direct source inspection -- meaning xoluman's already-shipped 'Test connection' feature can only confirm the server is reachable, not that the stored token is actually valid. Closes when the xolu team responds; T-02/T-03/T-09 pick back up from whatever they decide.
+
+**Second document filed 2026-08-03:** docs/xolu-requests-fsm-def.md -- a separate, focused request for the FSM definition write methods T-14 needs (CreateMachineDef/ReplaceMachineDef/DeleteMachineDef/ValidateMachineDef), split out from the main request rather than appended, since the xolu team was already mid-refinement on the /blob API and a tight, precisely-scoped second ask fit that timing better than folding into the larger document. Exact request/response shapes verified directly against pkg/server/v2_fsm_def_handlers.go, not inferred from docs.
+
+**Response received 2026-08-04, xolu v0.25.0 (docs/xoluman-letter-2026-08-04.md).** Covers only the FIRST document (docs/xolu-requests.md) -- the FSM-def document is untouched, no response yet, tracked separately below since it's now genuinely distinct open work, not part of this closure. Every claim in the letter was checked directly against the v0.25.0 source before trusting it, not taken at face value -- all held up exactly as described.
+
+Resolved: item 1 (Blob methods: BlobPut/BlobGet/BlobHead/BlobDelete/BlobList/BlobUsage, pkg/client/blob.go, client-side key validation confirmed) -- item 2 (Export, redesigned as async/tenant-scoped/blob-backed rather than the originally-scoped synchronous stream, for real security reasons: the old GET /api/v1/export had zero tenant scoping, one valid credential could pull the entire cross-tenant database; Client.Export(ctx, w) hides the polling, matches the original synchronous experience) -- item 3 (Raw method, pkg/client/raw.go, confirmed: no tenant-prefixing, no structured-error decoding, single-attempt -- exactly as requested) -- item 4 (DefineEntitySchema, pkg/client/schema.go).
+
+NOT resolved, not mentioned in the letter at all: item 5 (Client.Health() still doesn't apply auth -- confirmed unchanged by direct re-inspection of the v0.25.0 source; "Test connection"/"Test before saving" still can only confirm reachability, not credential validity) and item 6 (the FieldDef.Type doc/code inconsistency, low-priority, never followed up on either side).
+
+Two bonus items neither requested nor expected, both verified directly against source: ListEntities(ctx, includeGraph) -- lists every entity type with actual data, schemaless or not, with row counts/schema status/adapted-table columns/graph footprint; this is the real fix for the schema-less-discovery gap T-16 patched with a workaround (jump-by-name), and should replace that workaround, not just sit alongside it. And schema promotion (GetSchemaSuggestion/PromoteFlex/PromoteStrict) -- preview-then-promote a schemaless entity type to schemaful, PromoteStrict validating every existing row atomically before migrating anything (rejection is a normal PromoteJobStatus outcome, not a Go error).
+
+Closing T-13 for the resolved items. Filing new tracking for: replacing T-16's workaround with real ListEntities-based discovery; the blob browser (T-09) now genuinely unblocked; the REST console (T-12) now genuinely unblocked via Raw; schema promotion as a new entity-browser feature; Health()'s auth gap re-filed as its own standalone item since it's now the only thing left unaddressed from the original ask.
+
+Cross-ref: CHANGELOG pending.
+
 ## [0.6.1] T-08 — Module registry (registration + nav), no RBAC layer (v0.6.1, 2026-08-03)
 
 Theme: ui-shell · closed 0.6.1 · 2026-08-03

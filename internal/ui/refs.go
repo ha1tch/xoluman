@@ -14,6 +14,20 @@ import (
 	"github.com/ha1tch/xoluman/internal/formengine"
 )
 
+// resolveFormOptionsMaybeSchema wraps resolveFormOptions for callers
+// that may only have an inferred field list, not a real schema (see
+// resolveEntityFields) — constructs a minimal synthetic schema (name
+// only, no Refs) when schema is nil, since resolveFormOptions itself
+// needs something to read .Name from for the fieldmeta lookup.
+// Ref-link resolution is simply skipped for an inferred field list —
+// inference has no way to know which fields are references.
+func resolveFormOptionsMaybeSchema(ctx context.Context, c *xclient.Client, connName, entityType string, schema *xclient.EntitySchema, values formengine.Values, errs formengine.Errors) formengine.RenderOptions {
+	if schema == nil {
+		schema = &xclient.EntitySchema{Name: entityType}
+	}
+	return resolveFormOptions(ctx, c, connName, schema, values, errs)
+}
+
 // refLabelFields are tried in order when resolving a human-readable
 // label for a ref target — the first present, non-empty string field
 // wins. There's no formal "display field" designation on a xolu schema
@@ -57,41 +71,80 @@ func resolveFormOptions(ctx context.Context, c *xclient.Client, connName string,
 		if ref.Target == "" {
 			continue // polymorphic target — no single entity type to link to
 		}
-		id, ok := refTargetID(values.Get(ref.Name))
+		id, embeddedLabel, ok := refValueInfo(values.Get(ref.Name))
 		if !ok {
 			continue // unset ref field — nothing to link to yet
 		}
+		label := embeddedLabel
+		if label == "" {
+			// GET normally embeds the resolved target document
+			// directly (see refValueInfo's own doc), so this fetch is
+			// the exception, not the rule — it only runs when the
+			// value is a bare ID: a freshly-typed, not-yet-saved form
+			// field, or a schema-less/inferred context with no
+			// embedded document to read a label from.
+			label = resolveRefLabel(ctx, c, ref.Target, id)
+		}
 		opts.RefLinks[ref.Name] = formengine.RefLink{
 			URL:   fmt.Sprintf("/connections/%s/entities/%s/%d/edit", connName, ref.Target, id),
-			Label: resolveRefLabel(ctx, c, ref.Target, id),
+			Label: label,
 		}
 	}
 
 	return opts
 }
 
-// refTargetID extracts an int64 ID from a ref field's raw decoded-JSON
-// value (float64, per encoding/json's default shapes) or a numeric
-// string (formengine.Values coming from a re-displayed, not-yet-saved
-// form uses ParseFormValues' own float64 output for ref fields, but a
-// freshly-typed value that failed some other field's validation could
-// in principle still be a string — handled defensively either way).
-// ok is false for zero, absent, or unparseable values.
-func refTargetID(v any) (int64, bool) {
+// refValueInfo extracts what's known about a ref field's raw decoded-
+// JSON value. There are three real shapes to handle, confirmed
+// directly against real xolu, not assumed:
+//   - a bare numeric ID (float64, or a numeric string from a
+//     redisplayed-after-error form) — what a freshly-typed, not-yet-
+//     submitted value looks like, and what this package's own text
+//     input for a ref field expects to show/accept
+//   - xolu's write shape: {"type":"REF","entity":"...","id":N} — what
+//     a ref field must be submitted as; a bare integer is rejected
+//     with XOLU-VL001 ("expected {type,entity,id}, got float64"),
+//     confirmed by trying it directly against a real server
+//   - xolu's read shape: GET embeds the *entire resolved target
+//     document* in place of the reference — {"id":N,"name":"...",
+//     ...every other field the target document has}, not a stub with
+//     just an ID. This is not documented anywhere consulted before
+//     this was caught by an end-to-end write-then-read round trip
+//     against a real server; every earlier ref-handling assumption in
+//     this package (link extraction, form redisplay, list preview) was
+//     built against a bare-ID assumption that never actually matched
+//     what GET returns.
+//
+// Returns the target ID and, when the value is the read-embedded shape
+// and carries one of refLabelFields, that label directly — no extra
+// fetch needed, since xolu already did the resolving. ok is false for
+// zero, absent, or unparseable values.
+func refValueInfo(v any) (id int64, embeddedLabel string, ok bool) {
 	switch t := v.(type) {
 	case float64:
 		if t == 0 {
-			return 0, false
+			return 0, "", false
 		}
-		return int64(t), true
+		return int64(t), "", true
 	case string:
-		var id int64
-		if _, err := fmt.Sscanf(t, "%d", &id); err != nil || id == 0 {
-			return 0, false
+		var parsedID int64
+		if _, err := fmt.Sscanf(t, "%d", &parsedID); err != nil || parsedID == 0 {
+			return 0, "", false
 		}
-		return id, true
+		return parsedID, "", true
+	case map[string]any:
+		idVal, ok := t["id"].(float64)
+		if !ok || idVal == 0 {
+			return 0, "", false
+		}
+		for _, field := range refLabelFields {
+			if s, ok := t[field].(string); ok && s != "" {
+				return int64(idVal), s, true
+			}
+		}
+		return int64(idVal), "", true
 	default:
-		return 0, false
+		return 0, "", false
 	}
 }
 

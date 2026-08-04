@@ -2,6 +2,308 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.6.15] — 2026-08-04
+
+- **README rewritten.** It had genuinely never been updated since the
+  project's very first commit — still read "v0.0.1, scaffolding stage,
+  no functionality shipped yet" at v0.6.14, referenced closed/
+  superseded tracking IDs (T-01/T-02/T-03), and described features
+  (CSV/XLSX/ODS export) that were never what actually got built. Now
+  reflects the real, current feature set, with every linked file
+  path verified to actually exist before committing to it.
+- **`docs/proposals/dbeaver-layout.md` added** — a design proposal for
+  a persistent sidebar tree + tabbed workspace, requested but not
+  built (per the request, a proposal to review, not an implementation
+  to ship). Splits the idea into a lower-cost sidebar-tree phase
+  (achievable with `hx-boost`, no fundamental architecture change) and
+  a genuinely expensive real-tabs phase (a client-side state rewrite),
+  recommending only the first for now, with the trade-offs of the
+  second stated honestly rather than glossed over.
+
+## [0.6.14] — 2026-08-04
+
+- **Real bug fixed: the Test button on the connections list did
+  nothing for any connection whose name contained a CSS-selector-
+  special character** (a period is completely ordinary in a real
+  connection name — e.g. "prod.local"). htmx's `hx-target` is used as
+  a literal `document.querySelector` CSS selector; the raw name went
+  in unescaped, so `#status-prod.local` parsed as "id `status-prod`
+  AND class `local`" and never matched the actual element — the swap
+  silently failed with nothing to notice anywhere. Confirmed directly
+  against the rendered HTML before fixing. Fixed by keying the status
+  element's id to the row's index instead of the connection name,
+  which is always CSS-safe regardless of what a connection is named.
+  Regression test added.
+- **Real bug fixed: the query editor's OQL/Sulpher/REST tabs shared
+  one CodeMirror document.** Switching modes only reconfigured the
+  language extension, never the document — reported precisely as "the
+  OQL tab contains the Sulpher query I was editing previously." Fixed:
+  each mode now keeps its own document, swapped via a full
+  `EditorView.setState()` on switch rather than an incremental
+  reconfigure.
+- **Investigated, not confirmed fixed:** Sulpher syntax highlighting
+  reportedly not appearing. Traced the full extension chain and found
+  nothing obviously wrong; the mode-switch fix above may resolve it as
+  a side effect (eliminates stale Compartment state) but this sandbox
+  has no real browser to confirm visually. Recorded honestly in
+  `KNOWN_ISSUES.md` rather than claimed fixed.
+- **Nav redesign: the "Connections" top-nav link is gone, replaced
+  with a proper brand/home link plus a real dark/light theme toggle.**
+  Root cause of the "never highlighted, not a tab, not a recognisable
+  UI element" report: `ActivePrefix: "/connections"` matched literally
+  every page in the app (everything lives under `/connections/...`),
+  so the link was permanently stuck in its own "active" state —
+  providing no real feedback, which is indistinguishable from looking
+  broken. The `dark:` Tailwind classes were already in place
+  throughout from early on; `theme.js` (loads synchronously before the
+  stylesheet, to avoid a flash of the wrong theme) is the toggle
+  mechanism itself, which had genuinely never been finished after
+  being requested. Persists via `localStorage`, falls back to system
+  preference.
+- Nav tests rewritten to match — the old active-marking test was
+  effectively untestable once Connections stopped being a nav-visible
+  module; now tests a real registered module instead of the one that
+  no longer applies.
+- **Investigated at length, not reproduced:** entities.go's Show/
+  EditForm/Delete/DeleteConfirm and the ref-link generation in both
+  the edit form and list preview were all tested directly, including
+  with xolu's v2 API surface genuinely enabled — none produced
+  `XOLU-ST004`. Needs the exact URL from the browser address bar when
+  the error appears to pin down further.
+
+## [0.6.13] — 2026-08-04
+
+- **Process correction, not new work: T-11 (grid editor) closed.** The
+  actual code — `internal/ui/grid.go`, `grid_test.go`,
+  `web/static/js/grid-editor.js` — was built, tested (11 tests), and
+  verified end-to-end against real xolu in an earlier pass this
+  session, but the closure procedure never ran at the time; it landed
+  silently inside a larger response without its own checkpoint. Caught
+  while reviewing the register before continuing further work.
+  Re-verified fresh before closing, not just trusted from the earlier
+  record: grid page loads with real vendored assets, `grid-data` GET
+  reflects real seeded data, `grid-data` POST genuinely `Patch`es
+  (`_version` incremented, value actually changed on the real server).
+
+## [0.6.12] — 2026-08-04
+
+- **T-12 closed: query editor, all three modes (OQL, Sulpher, REST).**
+  CodeMirror 6 vendored with three official language packages — MSSQL
+  dialect for OQL (a T-SQL subset by construction), real ANTLR4 Cypher
+  grammar for Sulpher (near-exactly openCypher9), JSON for REST request
+  bodies — one self-contained 1.2MB bundle, Lit shell around it matching
+  the same architecture as the grid editor. `internal/ui/query.go`
+  dispatches to `Client.OQL`, `Client.GraphQuery` (not the deprecated
+  `Sulpher` alias), and `Client.Raw` — the last of these genuinely
+  unblocked by xolu v0.25.0, not previously possible.
+- 10 Go handler tests plus JS syntax/bundle validation. Two real path
+  mistakes caught before they shipped: guessed `/api/v1/oql` instead of
+  the actual `/oql/query`, and `GraphQuery`'s `maxDepth` parameter
+  (missed on first read of the signature — `0` uses xolu's own server
+  default, confirmed from its doc comment rather than guessed).
+- Verified end-to-end against real xolu 0.26.0, all three modes: OQL
+  (`SELECT * FROM users WHERE age > 20`, real rows back with correct
+  types), Sulpher (`MATCH (n) RETURN n LIMIT 5` against real graph
+  data), and REST (`GET /api/v1/entities` returning real `ListEntities`
+  data through `Raw`) — including confirming a real 400 from an
+  invalid path came back as data with `statusCode` set, not a Go error,
+  which is the entire point of an escape-hatch REST mode.
+
+## [0.6.11] — 2026-08-04
+
+- **xolu upgraded to v0.26.0.** Adds the FSM definition write methods
+  requested in `docs/xolu-requests-fsm-def.md` —
+  `CreateMachineDef`/`ReplaceMachineDef`/`DeleteMachineDef`/
+  `ValidateMachineDef` — confirmed directly against the real source,
+  matching the request closely. Bonus: `analysis` now comes back as a
+  typed `MachineDefAnalysis` struct (reachability, determinism, cycles,
+  warnings) on all four, and `GetMachineDef` gained a
+  `ParsedAnalysis()` method. Two behavioral notes worth keeping for
+  whoever builds against these: `ReplaceMachineDef` affects future
+  machine creation only, no retroactive effect on already-running
+  machines; `DeleteMachineDef` has no reference check at all.
+- **Integrity of the xolu checkout explicitly re-verified before this
+  upgrade, at Horacio's request** — every one of the 800 files in the
+  v0.25.0 checkout checked against its own original `MANIFEST.sha256`:
+  zero mismatches, zero missing files, the only unlisted file being the
+  manifest itself (expected). No modifications had been made.
+- `internal/xoluext/fsmdef.go` — the hand-rolled raw-HTTP workaround
+  for these same four operations, built before the official client had
+  them — deleted. Zero callers anywhere in the codebase (confirmed by
+  grep before removing it); this was xoluman's own temporary code, not
+  something the separately-tracked FSM feature work had started
+  depending on. T-14's tracking entry updated to point at the real
+  client methods instead, and to record the two behavioral notes above,
+  since that work is being done on its own track and this update exists
+  so whoever picks it up next sees the current, correct state.
+- Fully backward compatible — full suite green against v0.26.0 with no
+  code changes needed elsewhere.
+
+## [0.6.10] — 2026-08-04
+
+- **T-09 closed: blob browser.** `internal/blobfs` presents xolu's flat
+  blob key store as a navigable folder hierarchy — a xoluman-only
+  presentation convention (`:` as an in-key delimiter, since xolu keys
+  reject `/` and `\`), never anything xolu itself knows about. Empty
+  folders are backed by real `xoluman_blob_folder` entities (schema-
+  less, same established pattern as `xoluman_field_meta`), reconciled
+  against the real blob scan on every browse: a blob-implied folder
+  with no matching entity gets one materialized; an implicit,
+  now-blobless entity with no child folders gets garbage-collected;
+  explicit folders persist regardless of contents.
+- UI: browse with breadcrumbs, upload (streamed straight to `BlobPut`,
+  no server-side temp file), download (streamed straight from
+  `BlobGet`), delete a file, create an explicit empty folder, delete an
+  empty folder — refused with `409` if it turns out not to be empty by
+  the time the click lands, re-checked server-side rather than trusted
+  from a possibly-stale listing.
+- Routing note: Go's `{path...}` wildcard is a full-suffix match, so a
+  sibling route like `.../download` under the same wildcard tree isn't
+  expressible — only the browse view sits on the wildcard path; every
+  other action lives on its own fixed route with the target key/parent
+  path carried as form data instead.
+- 17 tests in `blobfs` (90.2% coverage) against a genuinely stateful
+  fake xolu (real blob-key prefix matching and real entity CRUD — a
+  call-by-call mock can't honestly represent the reconciliation logic's
+  actual interdependent behavior), 9 more for the UI handlers. A real
+  bug caught in the test fixture itself, not the implementation:
+  `make([]byte, r.ContentLength)` panics when `ContentLength` is `-1`
+  (unknown length) — fixed to use `io.ReadAll`.
+- **Another real environment gotcha found and recorded, same category
+  as `XOLU_API_V2_ENABLED`:** blob storage is disabled by default too
+  — needs `XOLU_BLOB_ENABLED=true`, otherwise every blob call fails
+  with a 501 (correctly coded, at least, unlike the v2 gate's plain
+  404).
+- Verified end-to-end against real xolu 0.25.0 with blob storage
+  actually enabled: uploaded a real file into a nested path, confirmed
+  the implied folder was genuinely materialized as an entity (not just
+  shown in the UI), downloaded the file back and got the exact original
+  bytes, confirmed the real stored xolu key is colon-delimited, created
+  and confirmed an explicit empty folder survives having no blobs, then
+  deleted the file and confirmed the implicit folder chain was
+  correctly garbage-collected on the next browse while the explicit
+  folder was not.
+
+## [0.6.9] — 2026-08-04
+
+- **T-20 closed: schema promotion, a new entity-browser feature.** A
+  "Promote to schema" link on every schemaless row in the entity type
+  list opens a preview (`GetSchemaSuggestion` — sampled rows, per-field
+  inferred type/coverage/confidence, suggested enums, no side effects)
+  with the suggested schema in an editable textarea. Two submit paths:
+  strict (validates every existing row first, only migrates if all
+  pass, atomically — rejection renders which rows failed and why, and
+  is a normal outcome, not an error page) and flex (fast, synchronous,
+  explicitly labeled as not migrating pre-existing rows, with the
+  server's own warning surfaced verbatim when it applies).
+- 6 new tests, full suite green.
+- Verified end-to-end against real xolu 0.25.0: seeded a schemaless
+  type with 5 rows, previewed the real inferred suggestion, promoted
+  strict, confirmed the schema is now genuinely registered
+  (`GET /api/v1/schema/leads` 200, previously 404) and all 5 rows
+  survived the migration and are still listable.
+
+## [0.6.8] — 2026-08-04
+
+- **T-16 closed: schema-less entities can now be created and edited
+  through the generic form, not just browsed.** `NewForm`/`Create`/
+  `EditForm`/`Update` all fall back to inferring fields from real data
+  when `GetEntitySchema` 404s — `EditForm`/`Update` infer from the
+  specific row in play (no extra round trip for `EditForm`, which
+  already had the entity loaded; one extra `Get` for `Update`, which
+  didn't); `NewForm`/`Create` infer from any one existing row via
+  `List`. A genuinely empty, schema-less type (no schema, no data at
+  all) shows a clear message instead of a meaningless empty form or a
+  raw error. A real server error on the schema fetch still surfaces
+  normally throughout — only a 404 degrades to inference.
+- 12 new tests, full suite green.
+- Verified end-to-end against real xolu 0.25.0: empty schema-less type
+  → clear message; seeded one row → form correctly infers `label`/
+  `priority`/`enabled`; created a second row through the real form,
+  both landed with correct types (`priority` as a number, not a
+  string); edited and updated the first row, correctly re-typed and
+  persisted (`_version` incremented, confirming a real write).
+
+## [0.6.7] — 2026-08-04
+
+- **xolu upgraded to v0.25.0.** The xolu team's response to the
+  standing request (T-13, closed) — four of six original items
+  delivered (blob client methods, async tenant-scoped `Export`, `Raw`,
+  `DefineEntitySchema`), plus two unrequested bonus items
+  (`ListEntities`, schema promotion). Every claim in their delivery
+  letter was checked directly against the v0.25.0 source before being
+  trusted, not taken at face value — all held up exactly as described.
+  Two items from the original request remain open, re-filed as T-21:
+  `Client.Health()` still doesn't apply auth (confirmed unchanged),
+  and the minor `FieldDef.Type` doc inconsistency.
+- **T-17 closed: the entity-type discovery gap (T-16) is now properly
+  fixed, not just worked around.** `ListEntities` lists every entity
+  type with actual data — schemaless or not — with row counts and
+  schema status, replacing the jump-by-name-only workaround from
+  v0.6.5. The jump form stays as a fast path for a known name, but
+  discovery itself no longer misses anything. Verified end-to-end
+  against real xolu 0.25.0: a schema-registered type and a genuinely
+  schemaless type, created directly against the server, both appear
+  correctly with accurate counts and schema status in the same list.
+- Filed for follow-up, not built this pass: the blob browser (T-09) and REST console (T-12) are now genuinely unblocked by the new
+  `Blob*`/`Raw` methods; schema promotion (`GetSchemaSuggestion`/
+  `PromoteFlex`/`PromoteStrict`) is a natural new entity-browser
+  feature once a schemaless type is visible in the list; `Health()`'s
+  auth gap re-filed standalone (T-21) since it's now the only thing
+  left open from the original request.
+- **Register cleanup, same pass:** T-02 and T-03 closed — the client
+  methods they asked for (`Export`, `Raw`) now exist, delivered by the
+  xolu team, not xoluman code; the actual UI features that need them
+  are separately tracked (T-22 for backup/export, T-12 for the REST
+  console). T-18 and T-19, filed right after the letter arrived,
+  turned out to duplicate unblocking already captured in T-09 and T-12
+  themselves — closed as merged back in rather than left as second
+  open items for the same work.
+
+## [0.6.6] — 2026-08-03
+
+- Connection testing now works *before* saving — a "Test before saving"
+  button in the New Connection modal, submitting the form's current
+  field values directly (no store interaction at all) rather than
+  requiring save-then-test-then-delete-if-wrong. `Create` and the new
+  `TestUnsaved` handler share one `connectionFromForm` helper so the
+  two never parse the submitted fields differently.
+- Verified end-to-end against real xolu: reachable, unreachable, and
+  the one guarantee that actually matters here — confirmed nothing
+  gets persisted to the connection store either way.
+- 5 new tests, full suite green.
+
+## [0.6.5] — 2026-08-03
+
+- **Real bug, from a real user report: schema-less entity types were
+  completely invisible in the entity browser.** Traced to a wrong
+  assumption baked into the browser since T-07/T-10 first shipped —
+  that every entity type has a registered schema. It doesn't have to:
+  xolu lets you create and read entity data with zero schema ever
+  registered, but `GET /api/v1/schemas` only reflects *registered*
+  schemas, and `GET /api/v1/schema/{entity}` 404s for an unregistered
+  type. Every entity page called `GetEntitySchema` first and treated
+  any failure as fatal — so a schema-less type's data was real,
+  reachable directly via curl, and completely unbrowsable through
+  xoluman.
+- Fixed: `Show` now infers preview columns from the fetched rows' own
+  JSON value types when the schema fetch 404s (`inferFieldsFromEntities`
+  — union of keys across returned rows, type from each value's JSON
+  shape), rather than failing the page. A genuine server error on the
+  schema fetch still surfaces normally — only a 404 degrades.
+- The entity-type list page gained a "browse by name" jump — discovery
+  via `/schemas` is incomplete by xolu's own design (it can only ever
+  list *registered* schemas), so a client-side fix can't make it
+  complete; typing a known type name bypasses discovery entirely, since
+  `List` itself doesn't need a schema.
+- **Not yet fixed, tracked as T-16**: `EditForm`/`Update`/`NewForm`/
+  `Create` still assume a schema — a schema-less type can be browsed
+  now but not yet edited or created through the generic form.
+- Verified end-to-end against real xolu: created a genuinely
+  schema-less entity, confirmed it was invisible to the old code path,
+  confirmed the fix makes it visible and correctly rendered.
+- 8 new tests, full suite green.
+
 ## [0.6.4] — 2026-08-03
 
 - **T-15 (partial)** — REF field navigation and listbox/select fields,

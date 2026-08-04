@@ -125,7 +125,7 @@ func renderField(b *mi.Builder, f client.FieldDef, opts RenderOptions) mi.Node {
 		// a dropdown regardless of its underlying JSON Schema type.
 		input = selectInput(b, f, values, disabled, opts.FieldOptions[f.Name])
 	case f.Format == "ref" || f.Type == "ref":
-		input = textInput(b, f, values, disabled)
+		input = refInput(b, f, values, disabled)
 		if rl, ok := opts.RefLinks[f.Name]; ok {
 			refLink = b.A(mi.Href(rl.URL), mi.Class(refLinkClass), "→ "+rl.Label)
 		}
@@ -213,6 +213,44 @@ func textInput(b *mi.Builder, f client.FieldDef, values Values, disabled bool) m
 	attrs := append([]mi.Attribute{mi.Type(inputTypeFor(f.Format))}, baseAttrs(f, disabled)...)
 	attrs = append(attrs, mi.Value(stringifyValue(values.Get(f.Name))))
 	return b.Input(attrs...)
+}
+
+// refInput renders a ref field's editable input showing just the
+// target ID — not the generic stringifyValue, which would json.Marshal
+// an entire embedded object into the field. xolu's GET response embeds
+// the *whole resolved target document* in place of a reference
+// ({"id":N,"name":"...",...every other field the target has}), not a
+// bare ID or the write-shape structured object either — confirmed
+// directly against a real server, not assumed. refFieldValue extracts
+// just the ID regardless of which of the three real shapes (bare
+// number, xolu's write shape, xolu's read shape) the value happens to
+// be in.
+func refInput(b *mi.Builder, f client.FieldDef, values Values, disabled bool) mi.Node {
+	attrs := append([]mi.Attribute{mi.Type("text")}, baseAttrs(f, disabled)...)
+	attrs = append(attrs, mi.Value(refFieldValue(values.Get(f.Name))))
+	return b.Input(attrs...)
+}
+
+// refFieldValue extracts a ref field's target ID as a plain string,
+// regardless of which real shape the raw decoded-JSON value is in. See
+// refInput's doc comment for why this can't just be stringifyValue.
+func refFieldValue(v any) string {
+	switch t := v.(type) {
+	case float64:
+		if t == 0 {
+			return ""
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case string:
+		return t // already a plain numeric string (e.g. redisplay after a validation error elsewhere in the form)
+	case map[string]any:
+		if id, ok := t["id"].(float64); ok {
+			return strconv.FormatFloat(id, 'f', -1, 64)
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 // inputTypeFor maps a JSON Schema "format" to the closest native HTML

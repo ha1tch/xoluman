@@ -89,11 +89,12 @@ func (h *EntitiesHandler) ImportPreview(w http.ResponseWriter, r *http.Request) 
 	defer func() { _ = file.Close() }()
 
 	var rows []importer.Row
+	refTargets := refTargetsByField(schema)
 	switch r.FormValue("format") {
 	case "json":
-		rows, err = importer.ParseJSON(file, schema.Fields)
+		rows, err = importer.ParseJSON(file, schema.Fields, refTargets)
 	default:
-		rows, err = importer.ParseCSV(file, schema.Fields)
+		rows, err = importer.ParseCSV(file, schema.Fields, refTargets)
 	}
 	if err != nil {
 		http.Error(w, "parsing import file: "+err.Error(), http.StatusBadRequest)

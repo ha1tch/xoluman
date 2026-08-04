@@ -124,9 +124,12 @@ func TestPage_NavReflectsRegisteredModules(t *testing.T) {
 	defer func() {
 		// registry has no Remove; rebuild it from scratch minus the
 		// probe, then re-register what production code actually
-		// expects (mirrors connections.go's own init()).
+		// expects (mirrors connections.go's own init() — Label is
+		// deliberately empty, matching the real registration: the
+		// brand/home link in PageWithHead covers this now, not a
+		// separate always-on nav item).
 		registry = modules.NewRegistry()
-		registry.Register(modules.Module{ID: "connections", Label: "Connections", URL: "/connections", ActivePrefix: "/connections", Order: 0})
+		registry.Register(modules.Module{ID: "connections", Label: "", URL: "/connections", ActivePrefix: "/connections", Order: 0})
 	}()
 
 	html := mi.RenderToString(Page("Test", "/", func(b *mi.Builder) mi.Node { return b.P("body") }))
@@ -136,8 +139,60 @@ func TestPage_NavReflectsRegisteredModules(t *testing.T) {
 }
 
 func TestPage_NavMarksActiveModuleByPrefix(t *testing.T) {
-	html := mi.RenderToString(Page("Test", "/connections/local/entities", func(b *mi.Builder) mi.Node { return b.P("body") }))
-	if !strings.Contains(html, "font-semibold") {
-		t.Fatalf("nav doesn't mark Connections active for a /connections/... path: %s", html)
+	// Connections itself no longer has a nav Label to mark active (the
+	// brand/home link replaced it — see PageWithHead's own doc
+	// comment on why a permanently-active nav item was the actual
+	// design problem being fixed). Register a genuine Label-bearing
+	// module here instead, matching what any future nav-visible module
+	// would look like, and prove active-marking still works correctly
+	// for it.
+	registry.Register(modules.Module{ID: "active-test-module", Label: "ActiveTestModule", URL: "/active-test", ActivePrefix: "/active-test", Order: 999})
+	defer func() {
+		registry = modules.NewRegistry()
+		registry.Register(modules.Module{ID: "connections", Label: "", URL: "/connections", ActivePrefix: "/connections", Order: 0})
+	}()
+
+	activeHTML := mi.RenderToString(Page("Test", "/active-test/sub-path", func(b *mi.Builder) mi.Node { return b.P("body") }))
+	if !strings.Contains(activeHTML, `href="/active-test"`) || !strings.Contains(activeHTML, `class="text-gray-900 dark:text-white font-semibold no-underline" href="/active-test"`) {
+		t.Fatalf("ActiveTestModule not marked active for a matching path: %s", activeHTML)
+	}
+
+	inactiveHTML := mi.RenderToString(Page("Test", "/connections", func(b *mi.Builder) mi.Node { return b.P("body") }))
+	if !strings.Contains(inactiveHTML, `class="text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white no-underline" href="/active-test"`) {
+		t.Fatalf("ActiveTestModule marked active for a non-matching path: %s", inactiveHTML)
+	}
+}
+
+func TestPage_BrandLinkIsHomeAndAlwaysPresent(t *testing.T) {
+	// The brand mark is the home link now, not a nav "tab" that
+	// pretends to have active/inactive states it never meaningfully
+	// had (see PageWithHead's doc comment) — it should render
+	// identically regardless of which page it's on.
+	for _, path := range []string{"/connections", "/connections/local/entities/widgets", "/connections/local/blobs/photos"} {
+		html := mi.RenderToString(Page("Test", path, func(b *mi.Builder) mi.Node { return b.P("body") }))
+		if !strings.Contains(html, `class="font-semibold text-gray-900 dark:text-white no-underline hover:text-indigo-600 dark:hover:text-indigo-400" href="/connections">xoluman<`) {
+			t.Fatalf("brand/home link missing or changed for path %q: %s", path, html)
+		}
+	}
+}
+
+func TestPage_ThemeToggleAndThemeJSPresent(t *testing.T) {
+	html := mi.RenderToString(Page("Test", "/connections", func(b *mi.Builder) mi.Node { return b.P("body") }))
+	if !strings.Contains(html, `id="theme-toggle-btn"`) {
+		t.Fatalf("theme toggle button missing: %s", html)
+	}
+	if !strings.Contains(html, `onclick="xoluTheme.toggle()"`) {
+		t.Fatalf("theme toggle button missing its onclick handler: %s", html)
+	}
+	if !strings.Contains(html, `src="/static/js/theme.js"`) {
+		t.Fatalf("theme.js not loaded: %s", html)
+	}
+	// theme.js must load before the stylesheet (and everything else)
+	// to set the dark/light class before first paint — this ordering
+	// is the entire point, not incidental.
+	themeIdx := strings.Index(html, "theme.js")
+	cssIdx := strings.Index(html, "tailwind.css")
+	if themeIdx == -1 || cssIdx == -1 || themeIdx > cssIdx {
+		t.Fatalf("theme.js must load before the stylesheet to avoid a flash of the wrong theme: %s", html)
 	}
 }

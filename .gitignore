@@ -1,0 +1,19 @@
+# Build artifacts
+/xoluman
+/coverage.out
+/coverage.html
+
+# Local connection store (tokens/API keys) — never committed
+connections.json
+*.connections.json
+.xoluman/
+
+# Go
+/vendor/
+
+# Node (Tailwind build tooling only — never runs at runtime)
+/node_modules/
+
+# Editor/OS
+.DS_Store
+*.swp

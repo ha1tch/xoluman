@@ -16,35 +16,105 @@ import (
 	"github.com/ha1tch/xoluman/internal/formengine"
 )
 
-func TestRefTargetID_ZeroFloatIsUnset(t *testing.T) {
-	if _, ok := refTargetID(float64(0)); ok {
-		t.Fatal("refTargetID(0) ok=true, want false — zero means unset")
+func TestRefValueInfo_ZeroFloatIsUnset(t *testing.T) {
+	if _, _, ok := refValueInfo(float64(0)); ok {
+		t.Fatal("refValueInfo(0) ok=true, want false — zero means unset")
 	}
 }
 
-func TestRefTargetID_PositiveFloat(t *testing.T) {
-	id, ok := refTargetID(float64(42))
+func TestRefValueInfo_PositiveFloat(t *testing.T) {
+	id, label, ok := refValueInfo(float64(42))
 	if !ok || id != 42 {
-		t.Fatalf("refTargetID(42.0) = %d, %v, want 42, true", id, ok)
+		t.Fatalf("refValueInfo(42.0) = %d, %q, %v, want 42, \"\", true", id, label, ok)
+	}
+	if label != "" {
+		t.Fatalf("label = %q, want empty — a bare number carries no embedded label", label)
 	}
 }
 
-func TestRefTargetID_Nil(t *testing.T) {
-	if _, ok := refTargetID(nil); ok {
-		t.Fatal("refTargetID(nil) ok=true, want false")
+func TestRefValueInfo_Nil(t *testing.T) {
+	if _, _, ok := refValueInfo(nil); ok {
+		t.Fatal("refValueInfo(nil) ok=true, want false")
 	}
 }
 
-func TestRefTargetID_NumericString(t *testing.T) {
-	id, ok := refTargetID("42")
+func TestRefValueInfo_NumericString(t *testing.T) {
+	id, _, ok := refValueInfo("42")
 	if !ok || id != 42 {
-		t.Fatalf("refTargetID(\"42\") = %d, %v, want 42, true", id, ok)
+		t.Fatalf("refValueInfo(\"42\") = %d, %v, want 42, true", id, ok)
 	}
 }
 
-func TestRefTargetID_NonNumericString(t *testing.T) {
-	if _, ok := refTargetID("not-a-number"); ok {
-		t.Fatal("refTargetID(\"not-a-number\") ok=true, want false")
+func TestRefValueInfo_NonNumericString(t *testing.T) {
+	if _, _, ok := refValueInfo("not-a-number"); ok {
+		t.Fatal("refValueInfo(\"not-a-number\") ok=true, want false")
+	}
+}
+
+// The tests below are the actual point of this file's existence: xolu
+// does not return a bare ID for a ref field on GET — it embeds the
+// entire resolved target document ({"id":N,"name":"...",...}), not a
+// stub with just an ID. Confirmed directly against a real server, not
+// assumed; every ref-handling assumption before this was caught by an
+// end-to-end write-then-read round trip was built against a bare-ID
+// assumption that never matched what GET actually returns.
+
+func TestRefValueInfo_EmbeddedReadShape_ExtractsIDAndLabel(t *testing.T) {
+	id, label, ok := refValueInfo(map[string]any{"id": float64(7), "name": "Alice", "_version": float64(1)})
+	if !ok {
+		t.Fatal("ok = false, want true for a valid embedded document")
+	}
+	if id != 7 {
+		t.Fatalf("id = %d, want 7", id)
+	}
+	if label != "Alice" {
+		t.Fatalf("label = %q, want %q — the embedded document's own name field, no extra fetch needed", label, "Alice")
+	}
+}
+
+func TestRefValueInfo_EmbeddedReadShape_TriesLabelFieldsInOrder(t *testing.T) {
+	// refLabelFields is ["name", "title", "label"] — confirm "title"
+	// is used when "name" isn't present.
+	id, label, ok := refValueInfo(map[string]any{"id": float64(3), "title": "Hello World"})
+	if !ok || id != 3 {
+		t.Fatalf("id, ok = %d, %v, want 3, true", id, ok)
+	}
+	if label != "Hello World" {
+		t.Fatalf("label = %q, want %q", label, "Hello World")
+	}
+}
+
+func TestRefValueInfo_EmbeddedReadShape_NoRecognisedLabelFieldStillExtractsID(t *testing.T) {
+	id, label, ok := refValueInfo(map[string]any{"id": float64(9), "sku": "WX-9"})
+	if !ok || id != 9 {
+		t.Fatalf("id, ok = %d, %v, want 9, true", id, ok)
+	}
+	if label != "" {
+		t.Fatalf("label = %q, want empty — no recognised label field present", label)
+	}
+}
+
+func TestRefValueInfo_EmbeddedShapeZeroIDIsUnset(t *testing.T) {
+	if _, _, ok := refValueInfo(map[string]any{"id": float64(0), "name": "x"}); ok {
+		t.Fatal("ok = true, want false for id 0")
+	}
+}
+
+func TestRefValueInfo_WriteShape_ExtractsIDNoLabel(t *testing.T) {
+	// xolu's own write shape — {"type":"REF","entity":"...","id":N} —
+	// carries no label to extract, only an ID.
+	id, label, ok := refValueInfo(map[string]any{"type": "REF", "entity": "users", "id": float64(7)})
+	if !ok || id != 7 {
+		t.Fatalf("id, ok = %d, %v, want 7, true", id, ok)
+	}
+	if label != "" {
+		t.Fatalf("label = %q, want empty — the write shape has no name/title/label field", label)
+	}
+}
+
+func TestRefValueInfo_MapWithoutIDField(t *testing.T) {
+	if _, _, ok := refValueInfo(map[string]any{"name": "Alice"}); ok {
+		t.Fatal("ok = true, want false when the map has no id field at all")
 	}
 }
 
@@ -106,6 +176,42 @@ func TestResolveRefLabel_FetchFailureFallsBackToID(t *testing.T) {
 	label := resolveRefLabel(context.Background(), c, "widgets", 999)
 	if label != "widgets #999" {
 		t.Fatalf("label = %q, want a fallback label even when the fetch fails, not a crash", label)
+	}
+}
+
+func TestResolveFormOptions_EmbeddedLabelUsedDirectly_NoExtraFetch(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/users/7", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("a separate fetch was made — the embedded document's own label should have been used directly, no round trip needed")
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST001", "message": "not found"}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	c := xclient.New(server.URL)
+
+	schema := &xclient.EntitySchema{
+		Name:   "posts",
+		Fields: []xclient.FieldDef{{Name: "author_id", Type: "integer", Format: "ref"}},
+		Refs:   []xclient.RefFieldDef{{Name: "author_id", Target: "users"}},
+	}
+	// This is what a real GET actually returns for a ref field — the
+	// whole resolved target document, not a bare ID.
+	values := formengine.Values{"author_id": map[string]any{"id": float64(7), "name": "Alice"}}
+
+	opts := resolveFormOptions(context.Background(), c, "local", schema, values, nil)
+
+	link, ok := opts.RefLinks["author_id"]
+	if !ok {
+		t.Fatal("RefLinks[author_id] missing")
+	}
+	if link.URL != "/connections/local/entities/users/7/edit" {
+		t.Fatalf("link.URL = %q, unexpected", link.URL)
+	}
+	if link.Label != "Alice" {
+		t.Fatalf("link.Label = %q, want the embedded document's own name", link.Label)
 	}
 }
 

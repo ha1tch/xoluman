@@ -63,6 +63,16 @@ func (r Row) OK() bool { return len(r.Errors) == 0 }
 // silently ignored rather than erroring — an export from elsewhere with
 // extra columns should still import the columns it recognises.
 //
+// refTargets maps a ref field's name to its target entity type (see
+// internal/ui's refTargetsByField) — needed because xolu requires ref
+// values in a structured write shape, not a bare ID (confirmed
+// directly against a real server: XOLU-VL001, "expected
+// {type,entity,id}, got float64"); this package delegates that
+// construction to formengine.ParseFormValues, which needs the same
+// info. Pass nil when unavailable (schema-less/inferred fields) — a
+// ref column then imports as a plain number and fails xolu's own
+// validation on write with a clear error, not a silent guess.
+//
 // Boolean fields are deliberately not delegated to
 // formengine.ParseFormValues along with everything else: that function's
 // boolean handling is checkbox-shaped (a present form key means
@@ -72,7 +82,7 @@ func (r Row) OK() bool { return len(r.Errors) == 0 }
 // "false" cell, and treating presence alone as true would silently
 // flip every boolean column true the moment it's included in the file
 // at all. Booleans get their own value-based parse here instead.
-func ParseCSV(r io.Reader, fields []client.FieldDef) ([]Row, error) {
+func ParseCSV(r io.Reader, fields []client.FieldDef, refTargets map[string]string) ([]Row, error) {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1 // tolerate ragged rows rather than aborting the whole file on one short line
 
@@ -105,7 +115,7 @@ func ParseCSV(r io.Reader, fields []client.FieldDef) ([]Row, error) {
 			form.Set(col, record[i])
 		}
 
-		values, errs := formengine.ParseFormValues(fields, form)
+		values, errs := formengine.ParseFormValues(fields, form, refTargets)
 		resolveCSVBooleans(fields, cellByColumn, values, errs)
 
 		rows = append(rows, Row{Index: index, Values: values, Errors: errs})
@@ -154,7 +164,20 @@ func parseCSVBool(cell string) (bool, error) {
 
 // ParseJSON parses r as a JSON array of objects, one per entity to
 // import.
-func ParseJSON(r io.Reader, fields []client.FieldDef) ([]Row, error) {
+//
+// refTargets maps a ref field's name to its target entity type, same
+// as ParseCSV — needed because xolu requires ref values in a
+// structured write shape ({"type":"REF","entity":"<target>","id":N}),
+// not a bare ID (confirmed directly against a real server:
+// XOLU-VL001, "expected {type,entity,id}, got float64"). A bare number
+// is the natural way someone would hand-author a ref value in a JSON
+// import file, so it's normalized automatically when the target is
+// known; an already-structured value passes through unchanged. Pass
+// nil refTargets when unavailable — a ref field then imports as
+// whatever was literally written and fails xolu's own validation on
+// write with a clear error if that happens to be a bare number, not a
+// silent guess at which entity type it points at.
+func ParseJSON(r io.Reader, fields []client.FieldDef, refTargets map[string]string) ([]Row, error) {
 	var records []map[string]any
 	if err := json.NewDecoder(r).Decode(&records); err != nil {
 		return nil, fmt.Errorf("parsing JSON: %w", err)
@@ -167,9 +190,29 @@ func ParseJSON(r io.Reader, fields []client.FieldDef) ([]Row, error) {
 			v, present := rec[f.Name]
 			if f.Required && (!present || v == nil) {
 				errs[f.Name] = "This field is required."
+				continue
+			}
+			if !present || v == nil {
+				continue
+			}
+			if (f.Format == "ref" || f.Type == "ref") && refTargets[f.Name] != "" {
+				rec[f.Name] = normalizeRefValue(v, refTargets[f.Name])
 			}
 		}
 		rows[i] = Row{Index: i + 1, Values: formengine.Values(rec), Errors: errs}
 	}
 	return rows, nil
+}
+
+// normalizeRefValue ensures a ref field's JSON-import value is in
+// xolu's required structured write shape, wrapping a bare number (the
+// natural way someone would hand-author a ref in an import file) if
+// that's what was given. An already-structured value (someone who
+// already knew the write shape) passes through unchanged, not
+// double-wrapped or altered.
+func normalizeRefValue(v any, target string) any {
+	if n, ok := v.(float64); ok {
+		return map[string]any{"type": "REF", "entity": target, "id": int64(n)}
+	}
+	return v // already structured, or a shape this can't help with — xolu's own validation is the right place for that to fail, not a guess here
 }

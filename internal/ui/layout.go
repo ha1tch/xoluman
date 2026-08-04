@@ -53,6 +53,11 @@ func PageWithHead(title, activePath string, extraHead []mi.Node, body mi.H) mi.H
 			b.Meta(mi.Charset("UTF-8")),
 			b.Meta(mi.Name("viewport"), mi.Content("width=device-width, initial-scale=1")),
 			b.Title(title + " — xoluman"),
+			// theme.js first and deliberately not deferred — see its
+			// own doc comment: setting the dark/light class has to
+			// happen before first paint, not after the stylesheet or
+			// any other script has had a chance to render anything.
+			b.Script(mi.Attr("src", "/static/js/theme.js")),
 			b.Link(mi.Rel("stylesheet"), mi.Href("/static/css/tailwind.css")),
 			b.Script(mi.Attr("src", "/static/vendor/htmx@1.9.10.min.js")),
 			b.Script(mi.Attr("src", "/static/js/modal.js")),
@@ -63,6 +68,16 @@ func PageWithHead(title, activePath string, extraHead []mi.Node, body mi.H) mi.H
 			headArgs[i] = n
 		}
 
+		// The brand mark doubles as the home link — xoluman has
+		// exactly one meaningful top-level destination (the connection
+		// list), and every single page in the app lives somewhere
+		// under /connections/..., which made a separate "Connections"
+		// nav item permanently render in its own active state: no
+		// real feedback, and by report ("never highlighted, not a
+		// tab, not a recognisable UI element") it just looked broken.
+		// One honest, always-clickable brand/home link plus the theme
+		// toggle replaces it — nothing pretending to be a multi-item
+		// nav that isn't one.
 		mods := registry.All()
 		navLinks := make([]interface{}, 0, len(mods))
 		for _, m := range mods {
@@ -77,9 +92,23 @@ func PageWithHead(title, activePath string, extraHead []mi.Node, body mi.H) mi.H
 			navLinks = append(navLinks, b.A(mi.Href(m.URL), mi.Class(class), m.Label))
 		}
 
+		themeToggle := b.Button(
+			mi.ID("theme-toggle-btn"), mi.Type("button"),
+			mi.Attr("onclick", "xoluTheme.toggle()"),
+			mi.Attr("aria-label", "Toggle dark and light theme"),
+			mi.Class("ml-auto text-lg leading-none cursor-pointer border-0 bg-transparent text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"),
+			// Server-rendered HTML can't know the client's saved
+			// preference — theme.js sets the real glyph on load via
+			// this same element's id, matching whatever it actually
+			// applied. This starting glyph is only what's briefly
+			// visible before that runs.
+			"☾",
+		)
+
 		nav := b.Nav(mi.Class("flex items-center gap-6 px-5 py-3 border-b border-gray-200 dark:border-gray-700"),
-			b.Div(mi.Class("font-semibold text-gray-900 dark:text-white"), "xoluman"),
+			b.A(mi.Href("/connections"), mi.Class("font-semibold text-gray-900 dark:text-white no-underline hover:text-indigo-600 dark:hover:text-indigo-400"), "xoluman"),
 			b.Div(append([]interface{}{mi.Class("flex gap-4")}, navLinks...)...),
+			themeToggle,
 		)
 
 		main := b.Main(mi.Class("max-w-5xl mx-auto p-5"), body(b))

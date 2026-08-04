@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -47,6 +48,52 @@ func TestConnectionsHandler_NewForm_RendersFields(t *testing.T) {
 	for _, want := range []string{`name="name"`, `name="base_url"`, `name="auth_mode"`, `name="token"`, `name="tenant"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing field %q: %s", want, body)
+		}
+	}
+}
+
+func TestConnectionsHandler_List_StatusIDIsCSSSafeRegardlessOfConnectionName(t *testing.T) {
+	// Real bug, not hypothetical: htmx's hx-target is a literal CSS
+	// selector (document.querySelector). Embedding the raw connection
+	// name in it broke silently for any name containing a CSS-special
+	// character — a period is a completely ordinary thing to have in a
+	// real connection name (e.g. "prod.local"). "#status-prod.local"
+	// parses as "id status-prod AND class local", which never matches
+	// the actual element (id "status-prod.local", no class at all) —
+	// querySelector returns null, htmx's swap silently does nothing.
+	// Confirmed directly against the real rendered HTML before fixing.
+	store := newTestStore(t)
+	h := NewConnectionsHandler(store)
+	seedTwoConnections(t, store, "prod.local", "dev:server")
+
+	req := httptest.NewRequest(http.MethodGet, "/connections", nil)
+	rec := httptest.NewRecorder()
+	h.List(rec, req)
+
+	body := rec.Body.String()
+	idMatches := regexp.MustCompile(`id="(status-[^"]*)"`).FindAllStringSubmatch(body, -1)
+	targetMatches := regexp.MustCompile(`hx-target="#(status-[^"]*)"`).FindAllStringSubmatch(body, -1)
+	if len(idMatches) != 2 || len(targetMatches) != 2 {
+		t.Fatalf("expected 2 status ids and 2 hx-targets, got %d and %d: %s", len(idMatches), len(targetMatches), body)
+	}
+	for i := range idMatches {
+		id, target := idMatches[i][1], targetMatches[i][1]
+		if id != target {
+			t.Fatalf("id %q does not match hx-target %q — htmx's swap would silently fail", id, target)
+		}
+		if strings.ContainsAny(id, ".:()[] ") {
+			t.Fatalf("status id %q contains a CSS-selector-special character — the exact bug being guarded against", id)
+		}
+	}
+}
+
+func seedTwoConnections(t *testing.T, store connstore.Store, name1, name2 string) {
+	t.Helper()
+	for _, name := range []string{name1, name2} {
+		if _, err := store.Save(context.Background(), connstore.Connection{
+			ConnectionMeta: connstore.ConnectionMeta{Name: name, BaseURL: "http://localhost:8080", AuthMode: connstore.AuthNone},
+		}); err != nil {
+			t.Fatalf("seeding connection %q: %v", name, err)
 		}
 	}
 }
@@ -204,6 +251,99 @@ func TestConnectionsHandler_Delete_AlreadyGoneStillRedirects(t *testing.T) {
 
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+}
+
+func TestConnectionsHandler_TestUnsaved_ReachableAgainstRealServer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	h := NewConnectionsHandler(newTestStore(t))
+	form := url.Values{"base_url": {upstream.URL}, "auth_mode": {"none"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/new/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	h.TestUnsaved(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "reachable") || strings.Contains(body, "unreachable") {
+		t.Fatalf("body = %q, want a reachable fragment", body)
+	}
+}
+
+func TestConnectionsHandler_TestUnsaved_UnreachableWhenNothingListening(t *testing.T) {
+	h := NewConnectionsHandler(newTestStore(t))
+	form := url.Values{"base_url": {"http://127.0.0.1:1"}, "auth_mode": {"none"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/new/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	h.TestUnsaved(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "unreachable") {
+		t.Fatalf("body = %q, want an unreachable fragment", rec.Body.String())
+	}
+}
+
+func TestConnectionsHandler_TestUnsaved_MissingBaseURL(t *testing.T) {
+	h := NewConnectionsHandler(newTestStore(t))
+	form := url.Values{"base_url": {""}, "auth_mode": {"none"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/new/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	h.TestUnsaved(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "enter a base URL") {
+		t.Fatalf("body = %q, want a clear message rather than a raw connection failure", rec.Body.String())
+	}
+}
+
+func TestConnectionsHandler_TestUnsaved_NeverPersistsAnything(t *testing.T) {
+	// The whole point: testing from the modal must not save a
+	// connection, successful or not.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	store := newTestStore(t)
+	h := NewConnectionsHandler(store)
+	form := url.Values{"name": {"should-not-exist"}, "base_url": {upstream.URL}, "auth_mode": {"none"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/new/test", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	h.TestUnsaved(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "reachable") {
+		t.Fatalf("body = %q, want a reachable fragment (sanity check the test itself worked)", rec.Body.String())
+	}
+	if _, err := store.Get(context.Background(), "should-not-exist"); err == nil {
+		t.Fatal("a connection named \"should-not-exist\" was actually saved — TestUnsaved must never touch the store")
+	}
+}
+
+func TestConnectionsHandler_TestUnsaved_MalformedBody(t *testing.T) {
+	h := NewConnectionsHandler(newTestStore(t))
+	req := httptest.NewRequest(http.MethodPost, "/connections/new/test", nil)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+
+	h.TestUnsaved(rec, req)
+
+	// A nil body with ParseForm is actually fine (empty form) — this
+	// just confirms it degrades to the missing-base_url message rather
+	// than panicking on a nil/empty request body.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (a fragment response, not an error status)", rec.Code, http.StatusOK)
 	}
 }
 

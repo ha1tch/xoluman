@@ -7,6 +7,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -44,6 +45,13 @@ func fakeXoluWithWidgets(t *testing.T) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"schemas": []map[string]string{{"name": "widgets"}},
 			"count":   1,
+		})
+	})
+
+	mux.HandleFunc("GET /api/v1/entities", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entities": []map[string]any{{"entity_type": "widgets", "count": float64(2), "has_schema": true, "adapted": true}},
+			"count":    1,
 		})
 	})
 
@@ -342,6 +350,487 @@ func TestBuildGridColumns_EditorPerType(t *testing.T) {
 		if byField[field].Editor != wantEditor {
 			t.Fatalf("column %q Editor = %v, want %v", field, byField[field].Editor, wantEditor)
 		}
+	}
+}
+
+func TestEntitiesHandler_Show_SchemaLessTypeStillWorks(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "No schema found for gadgets"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "name": "Thing One"}},
+			"pagination": map[string]any{"page": 1, "per_page": 25, "total_items": 1, "total_pages": 1},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/gadgets", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	rec := httptest.NewRecorder()
+
+	h.Show(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (a missing schema must not fail the whole page); body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Thing One") {
+		t.Fatalf("body missing the real, schema-less entity data: %s", rec.Body.String())
+	}
+}
+
+func TestEntitiesHandler_Show_GenuineUpstreamErrorStillSurfaces(t *testing.T) {
+	// A real connectivity/server error on the schema fetch must not be
+	// silently swallowed the same way a 404 is — only "no schema
+	// registered" is a fine, expected condition to degrade from.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/widgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/widgets", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "widgets")
+	rec := httptest.NewRecorder()
+
+	h.Show(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d — a real server error must still surface, not be treated like a missing schema", rec.Code, http.StatusBadGateway)
+	}
+}
+
+func TestEntitiesHandler_List_JumpByNameRedirects(t *testing.T) {
+	h := NewEntitiesHandler(seedConnection(t, fakeXoluWithWidgets(t).URL))
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities?type=gadgets", nil)
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.List(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/connections/test/entities/gadgets" {
+		t.Fatalf("Location = %q, unexpected", loc)
+	}
+}
+
+func TestEntitiesHandler_List_NoEntitiesShowsJumpFormNotJustEmptyState(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/entities", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"entities": []map[string]any{}, "count": 0})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities", nil)
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.List(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="type"`) {
+		t.Fatalf("body missing the jump-by-name input even with zero entities: %s", body)
+	}
+	if !strings.Contains(body, "No entity types have any data") {
+		t.Fatalf("body missing the empty-state message: %s", body)
+	}
+}
+
+func TestEntitiesHandler_List_ShowsCountAndSchemaStatus(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/entities", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entities": []map[string]any{
+				{"entity_type": "widgets", "count": float64(42), "has_schema": true},
+				{"entity_type": "gadgets", "count": float64(3), "has_schema": false},
+			},
+			"count": 2,
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities", nil)
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.List(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{"widgets", "42", "has schema", "gadgets", "3", "no schema"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestInferFieldsFromEntities_UnionAcrossRows(t *testing.T) {
+	entities := []xclient.Entity{
+		{ID: 1, Data: map[string]any{"id": float64(1), "name": "A", "count": float64(3)}},
+		{ID: 2, Data: map[string]any{"id": float64(2), "name": "B", "active": true}},
+	}
+	fields := inferFieldsFromEntities(entities)
+
+	byName := make(map[string]xclient.FieldDef)
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+	if _, ok := byName["id"]; ok {
+		t.Fatal("inferred fields include \"id\", want it excluded (identity, not a data field)")
+	}
+	if byName["name"].Type != "string" || byName["count"].Type != "number" || byName["active"].Type != "boolean" {
+		t.Fatalf("byName = %+v, unexpected types", byName)
+	}
+}
+
+func TestIsNotFoundError_True(t *testing.T) {
+	err := &xclient.Error{HTTPStatus: 404}
+	if !isNotFoundError(err) {
+		t.Fatal("isNotFoundError(404) = false, want true")
+	}
+}
+
+func TestIsNotFoundError_FalseForOtherStatus(t *testing.T) {
+	err := &xclient.Error{HTTPStatus: 500}
+	if isNotFoundError(err) {
+		t.Fatal("isNotFoundError(500) = true, want false")
+	}
+}
+
+func TestIsNotFoundError_FalseForNonXoluError(t *testing.T) {
+	if isNotFoundError(errors.New("some other error")) {
+		t.Fatal("isNotFoundError on a plain error = true, want false")
+	}
+}
+
+func TestEntitiesHandler_NewForm_SchemaLessInfersFromExistingRow(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "No schema found for gadgets"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "name": "Existing Thing", "count": float64(5)}},
+			"pagination": map[string]any{"page": 1, "per_page": 1, "total_items": 1, "total_pages": 1},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/gadgets/new", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	rec := httptest.NewRecorder()
+
+	h.NewForm(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="name"`) || !strings.Contains(body, `name="count"`) {
+		t.Fatalf("body missing fields inferred from the existing row: %s", body)
+	}
+}
+
+func TestEntitiesHandler_NewForm_SchemaLessNoDataShowsClearMessage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "No schema found"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{},
+			"pagination": map[string]any{"page": 1, "per_page": 1, "total_items": 0, "total_pages": 0},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/gadgets/new", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	rec := httptest.NewRecorder()
+
+	h.NewForm(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (a clear message, not an error status)", rec.Code, http.StatusOK)
+	}
+	if !strings.Contains(rec.Body.String(), "no existing rows to infer fields from") {
+		t.Fatalf("body missing the clear no-data message: %s", rec.Body.String())
+	}
+}
+
+func TestEntitiesHandler_Create_SchemaLessInfersAndCreates(t *testing.T) {
+	var created map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "not found"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "name": "Existing", "count": float64(1)}},
+			"pagination": map[string]any{"page": 1, "per_page": 1, "total_items": 1, "total_pages": 1},
+		})
+	})
+	mux.HandleFunc("POST /api/v1/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&created)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(2), "message": "created"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	form := url.Values{"name": {"New Thing"}, "count": {"9"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/entities/gadgets", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	rec := httptest.NewRecorder()
+
+	h.Create(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+	if created["name"] != "New Thing" || created["count"] != float64(9) {
+		t.Fatalf("created = %+v, want name and count correctly typed from inferred fields", created)
+	}
+}
+
+func TestEntitiesHandler_EditForm_SchemaLessInfersFromTheEntityItself(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "not found"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets/1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(1), "name": "Thing One", "active": true})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/gadgets/1/edit", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	req.SetPathValue("id", "1")
+	rec := httptest.NewRecorder()
+
+	h.EditForm(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `value="Thing One"`) {
+		t.Fatalf("body missing the prepopulated name: %s", body)
+	}
+	if !strings.Contains(body, `type="checkbox"`) {
+		t.Fatalf("body missing the inferred boolean field as a checkbox: %s", body)
+	}
+}
+
+func TestEntitiesHandler_Update_SchemaLessInfersFromTheSpecificRow(t *testing.T) {
+	var patched map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "not found"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets/1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(1), "name": "Old Name", "count": float64(1)})
+	})
+	mux.HandleFunc("PUT /api/v1/gadgets/1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&patched)
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": "updated"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	form := url.Values{"name": {"New Name"}, "count": {"7"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/entities/gadgets/1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	req.SetPathValue("id", "1")
+	rec := httptest.NewRecorder()
+
+	h.Update(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusSeeOther, rec.Body.String())
+	}
+	if patched["name"] != "New Name" || patched["count"] != float64(7) {
+		t.Fatalf("patched = %+v, want correctly-typed values from inferred fields", patched)
+	}
+}
+
+func TestEntitiesHandler_Update_SchemaLessEntityGoneIsARealError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "not found"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets/1", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-EN001", "message": "not found"}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	form := url.Values{"name": {"New Name"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/entities/gadgets/1", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	req.SetPathValue("id", "1")
+	rec := httptest.NewRecorder()
+
+	h.Update(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d — a genuinely vanished row must surface as a real error, not silently degrade", rec.Code, http.StatusBadGateway)
+	}
+}
+
+func TestEntitiesHandler_GenuineSchemaErrorStillSurfaces(t *testing.T) {
+	// Distinguishing a real server error on the schema fetch from "no
+	// schema registered" matters across all four handlers — spot-check
+	// NewForm here, the same isNotFoundError gate all four share.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/gadgets/new", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	rec := httptest.NewRecorder()
+
+	h.NewForm(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+}
+
+func TestEntitiesHandler_Show_RefFieldRendersAsLinkInPreview(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/posts", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"title": map[string]any{"type": "string"}, "author_id": map[string]any{"type": "integer", "format": "ref", "target": "users"}},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/posts", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "title": "Hello", "author_id": float64(7)}},
+			"pagination": map[string]any{"page": 1, "per_page": 25, "total_items": 1, "total_pages": 1},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/posts", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "posts")
+	rec := httptest.NewRecorder()
+
+	h.Show(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="/connections/test/entities/users/7/edit"`) {
+		t.Fatalf("body missing the ref link for author_id: %s", body)
+	}
+	if !strings.Contains(body, ">7<") {
+		t.Fatalf("body missing the raw ID as link text (no label resolution in the list view — N+1 concern): %s", body)
+	}
+}
+
+func TestEntitiesHandler_Show_SchemaLessTypeHasNoRefLinks(t *testing.T) {
+	// Inference can't know which fields are references — must not
+	// crash or fabricate a link for a schema-less type's integer field.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "XOLU-ST008", "message": "not found"}})
+	})
+	mux.HandleFunc("GET /api/v1/gadgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "owner_id": float64(3)}},
+			"pagination": map[string]any{"page": 1, "per_page": 25, "total_items": 1, "total_pages": 1},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/gadgets", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "gadgets")
+	rec := httptest.NewRecorder()
+
+	h.Show(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/entities//") {
+		t.Fatalf("body contains a malformed ref link (empty target type): %s", rec.Body.String())
+	}
+}
+
+func TestRefTargetsByField_NilSchema(t *testing.T) {
+	if got := refTargetsByField(nil); got != nil {
+		t.Fatalf("refTargetsByField(nil) = %v, want nil", got)
+	}
+}
+
+func TestRefTargetsByField_SkipsEmptyTarget(t *testing.T) {
+	schema := &xclient.EntitySchema{Refs: []xclient.RefFieldDef{{Name: "target_id", Target: ""}, {Name: "author_id", Target: "users"}}}
+	got := refTargetsByField(schema)
+	if len(got) != 1 || got["author_id"] != "users" {
+		t.Fatalf("got = %v, want only author_id (polymorphic target_id with empty Target excluded)", got)
 	}
 }
 

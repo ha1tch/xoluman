@@ -18,6 +18,7 @@ var vendoredFiles = []string{
 	"static/vendor/tabulator@6.5.2.min.js",
 	"static/vendor/tabulator@6.5.2.min.css",
 	"static/vendor/lit@3.js",
+	"static/vendor/codemirror-bundle@1.js",
 	"static/vendor/VENDOR.md",
 }
 
@@ -51,6 +52,8 @@ func TestVendorFilesPresent_CatchesAMissingFile(t *testing.T) {
 var ownAuthoredJSFiles = []string{
 	"static/js/modal.js",
 	"static/js/grid-editor.js",
+	"static/js/query-editor.js",
+	"static/js/theme.js",
 }
 
 func TestOwnAuthoredJSFilesPresent(t *testing.T) {

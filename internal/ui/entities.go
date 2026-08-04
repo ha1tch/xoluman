@@ -50,6 +50,8 @@ func RegisterEntitiesModule(reg *modules.Registry, store connstore.Store) {
 			mux.HandleFunc("GET /connections/{name}/entities/{type}/grid", entities.GridView)
 			mux.HandleFunc("GET /connections/{name}/entities/{type}/grid-data", entities.GridData)
 			mux.HandleFunc("POST /connections/{name}/entities/{type}/grid-data", entities.GridSave)
+			mux.HandleFunc("GET /connections/{name}/entities/{type}/promote", entities.PromotePreview)
+			mux.HandleFunc("POST /connections/{name}/entities/{type}/promote", entities.Promote)
 		},
 	})
 }
@@ -105,6 +107,19 @@ func writeUpstreamError(w http.ResponseWriter, connName string, activePath strin
 // List renders the entity types available on the named connection.
 func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+
+	// Jump-by-name kept as a fallback for typing an exact known name
+	// directly — marginally faster than scanning a long list — but
+	// discovery itself now uses ListEntities (xolu v0.25.0), the real
+	// fix for what this was originally a workaround for: it lists
+	// every entity type with actual data, schemaless or not, unlike
+	// ListEntityTypes (confirmed: reflects validator.LoadedEntities(),
+	// registered schemas only — nothing to do with what data exists).
+	if jump := r.URL.Query().Get("type"); jump != "" {
+		http.Redirect(w, r, "/connections/"+name+"/entities/"+jump, http.StatusSeeOther)
+		return
+	}
+
 	c, err := h.clientFor(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, connstore.ErrNotFound) {
@@ -115,7 +130,7 @@ func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	types, err := c.ListEntityTypes(r.Context())
+	entries, err := c.ListEntities(r.Context(), false)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
@@ -125,19 +140,41 @@ func (h *EntitiesHandler) List(w http.ResponseWriter, r *http.Request) {
 		header := b.Div(mi.Class("mb-4"),
 			b.H1(mi.Class("text-xl font-semibold text-gray-900 dark:text-white"), "Entities on "+name),
 		)
-		if len(types) == 0 {
-			return b.Div(header, b.Div(mi.Class("text-center py-12 text-gray-500 dark:text-gray-400"), "No entity types registered on this instance."))
-		}
-		rows := make([]mi.Node, len(types))
-		for i, t := range types {
-			rows[i] = b.Tr(
-				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm"),
-					b.A(mi.Href("/connections/"+name+"/entities/"+t.Name), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), t.Name),
-				),
+		jumpForm := b.Form(mi.Attr("method", "get"), mi.Attr("action", "/connections/"+name+"/entities"), mi.Class("mb-4 flex gap-2 items-end"),
+			b.Div(
+				b.Label(mi.For("type"), mi.Class("block mb-1 text-sm text-gray-600 dark:text-gray-400"), "Jump to a type by name"),
+				b.Input(mi.Type("text"), mi.ID("type"), mi.Name("type"), mi.Placeholder("e.g. gadgets"), mi.Class(formInputClass)),
+			),
+			b.Button(mi.Type("submit"), mi.Class(btnSecondary), "Go"),
+		)
+		if len(entries) == 0 {
+			return b.Div(header, jumpForm,
+				b.Div(mi.Class("text-gray-500 dark:text-gray-400 text-sm"), "No entity types have any data on this instance yet."),
 			)
 		}
-		table := Table([]string{"Entity type"}, rows, "")(b)
-		return b.Div(header, table)
+		rows := make([]mi.Node, len(entries))
+		for i, e := range entries {
+			schemaLabel := "no schema"
+			schemaClass := "text-gray-400 dark:text-gray-500"
+			var promoteLink interface{}
+			if e.HasSchema {
+				schemaLabel = "has schema"
+				schemaClass = "text-gray-600 dark:text-gray-400"
+			} else {
+				promoteLink = b.A(mi.Href("/connections/"+name+"/entities/"+e.EntityType+"/promote"),
+					mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline text-xs"), "Promote to schema")
+			}
+			rows[i] = b.Tr(
+				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm"),
+					b.A(mi.Href("/connections/"+name+"/entities/"+e.EntityType), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), e.EntityType),
+				),
+				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm text-gray-600 dark:text-gray-400"), strconv.FormatInt(e.Count, 10)),
+				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm "+schemaClass), schemaLabel),
+				b.Td(mi.Class("px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm"), promoteLink),
+			)
+		}
+		table := Table([]string{"Entity type", "Rows", "Schema", ""}, rows, "")(b)
+		return b.Div(header, jumpForm, table)
 	}
 
 	WriteHTML(w, Page("Entities", r.URL.Path, body))
@@ -159,8 +196,20 @@ func (h *EntitiesHandler) Show(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Schemas are not obligatory in xolu — GetEntitySchema 404s for a
+	// perfectly real entity type that simply has no schema registered
+	// (confirmed directly: POST-then-GET on an unregistered type works
+	// fine end to end; only /api/v1/schema/{entity} 404s). That must
+	// not fail this page — c.List below doesn't need a schema at all,
+	// only the preview-column choice does, and that has a fallback.
+	var previewCols []xclient.FieldDef
 	schema, err := c.GetEntitySchema(r.Context(), entityType)
-	if err != nil {
+	switch {
+	case err == nil:
+		previewCols = previewFields(schema.Fields)
+	case isNotFoundError(err):
+		// Resolved after fetching below, from the data itself.
+	default:
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
@@ -179,13 +228,18 @@ func (h *EntitiesHandler) Show(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if previewCols == nil {
+		previewCols = previewFields(inferFieldsFromEntities(result.Entities))
+	}
+
 	basePath := "/connections/" + name + "/entities/" + entityType
 	cfg := ListPageConfig{Title: entityType, CreateLabel: "New " + entityType, CreateURL: basePath + "/new"}
+	refTargets := refTargetsByField(schema) // nil when schema is nil (inferred fields) — inference has no way to know which fields are references
 	body := func(b *mi.Builder) mi.Node {
 		importLink := b.A(mi.Href(basePath+"/import"), mi.Class(btnSecondary+" mb-3 inline-flex"), "Import from file")
 		gridLink := b.A(mi.Href(basePath+"/grid"), mi.Class(btnSecondary+" mb-3 inline-flex"), "Grid view")
 		links := b.Div(mi.Class("flex gap-2"), importLink, gridLink)
-		return b.Div(links, ListPage(cfg, entityListTable(name, entityType, previewFields(schema.Fields), result))(b))
+		return b.Div(links, ListPage(cfg, entityListTable(name, entityType, previewCols, refTargets, result))(b))
 	}
 
 	WriteHTML(w, Page(entityType, r.URL.Path, body))
@@ -215,7 +269,84 @@ func previewFields(fields []xclient.FieldDef) []xclient.FieldDef {
 	return out
 }
 
-func entityListTable(connName, entityType string, preview []xclient.FieldDef, result *xclient.ListResult) mi.H {
+// isNotFoundError reports whether err is xolu's own 404 — used to
+// distinguish "this specific thing doesn't exist" (a fine, expected
+// condition to degrade gracefully from — e.g. no schema registered)
+// from any other failure (connectivity, auth, a genuine server error),
+// which should still surface as an error rather than being silently
+// swallowed.
+func isNotFoundError(err error) bool {
+	xoluErr, ok := err.(*xclient.Error)
+	return ok && xoluErr.HTTPStatus == 404
+}
+
+// inferFieldsFromEntities derives a basic field list from actually-
+// fetched documents when no schema is registered for the entity type —
+// schemas are not obligatory in xolu, and entities created without one
+// are otherwise invisible to every schema-dependent page. This is a
+// best-effort fallback, not a real schema: type is inferred from each
+// key's JSON value shape (the same string/float64/bool/object/array
+// dispatch formengine's own stringifyValue already uses), no field is
+// ever marked Required (there's no way to know that without a real
+// schema), and the field set is the union across every fetched row —
+// a single row might not show every field the type actually has.
+func inferFieldsFromEntities(entities []xclient.Entity) []xclient.FieldDef {
+	seen := make(map[string]bool)
+	var fields []xclient.FieldDef
+	for _, e := range entities {
+		for key, val := range e.Data {
+			if key == "id" || key == "_version" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			fields = append(fields, xclient.FieldDef{Name: key, Type: inferJSONType(val)})
+		}
+	}
+	return fields
+}
+
+// inferJSONType maps a decoded-JSON value (encoding/json's default
+// unmarshal-into-any shapes) to the closest JSON Schema type name.
+func inferJSONType(v any) string {
+	switch v.(type) {
+	case string:
+		return "string"
+	case float64:
+		return "number"
+	case bool:
+		return "boolean"
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	default:
+		return "string"
+	}
+}
+
+// refTargetsByField builds a field-name -> target-entity-type map from
+// schema.Refs, for the list preview's cheap ref-link rendering — no
+// label resolution here (that would mean one extra Get per ref cell
+// per row, an N+1 problem this view deliberately avoids; the edit
+// form's resolveFormOptions already does resolve labels, where the
+// cost is bounded to a handful of fields on one entity, not one per
+// row across a whole page). Returns nil when schema is nil (the
+// schema-less/inferred-fields case) — inference has no way to know
+// which fields are references.
+func refTargetsByField(schema *xclient.EntitySchema) map[string]string {
+	if schema == nil {
+		return nil
+	}
+	targets := make(map[string]string, len(schema.Refs))
+	for _, ref := range schema.Refs {
+		if ref.Target != "" {
+			targets[ref.Name] = ref.Target
+		}
+	}
+	return targets
+}
+
+func entityListTable(connName, entityType string, preview []xclient.FieldDef, refTargets map[string]string, result *xclient.ListResult) mi.H {
 	return func(b *mi.Builder) mi.Node {
 		if len(result.Entities) == 0 {
 			return b.Div(mi.Class("text-center py-12 text-gray-500 dark:text-gray-400"), "No "+entityType+" entities yet.")
@@ -240,7 +371,19 @@ func entityListTable(connName, entityType string, preview []xclient.FieldDef, re
 			cells := make([]interface{}, 0, len(preview)+3)
 			cells = append(cells, b.Td(mi.Class(td), idStr))
 			for _, f := range preview {
-				cells = append(cells, b.Td(mi.Class(td), previewValue(e.Data[f.Name])))
+				value := e.Data[f.Name]
+				if target, isRef := refTargets[f.Name]; isRef {
+					if id, embeddedLabel, ok := refValueInfo(value); ok {
+						refURL := "/connections/" + connName + "/entities/" + target + "/" + strconv.FormatInt(id, 10) + "/edit"
+						linkText := embeddedLabel
+						if linkText == "" {
+							linkText = strconv.FormatInt(id, 10)
+						}
+						cells = append(cells, b.Td(mi.Class(td), b.A(mi.Href(refURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), linkText)))
+						continue
+					}
+				}
+				cells = append(cells, b.Td(mi.Class(td), previewValue(value)))
 			}
 			cells = append(cells,
 				b.Td(mi.Class(td), b.A(mi.Href(editURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), "Edit")),
@@ -308,6 +451,61 @@ func paginationBar(basePath string, page, totalPages int) mi.H {
 // NewForm renders the create form as a full page — entity schemas can
 // have many fields, unlike the connections form, so this deliberately
 // doesn't reuse the modal pattern the way "New connection" does.
+// resolveEntityFields returns the field list to render/parse a form
+// against — from a real registered schema when one exists, or inferred
+// from actual data when none is (schemas are not obligatory in xolu;
+// see docs/KNOWN_ISSUES.md's recorded finding). known, when non-nil, is
+// used directly to infer from without an extra round trip (EditForm/
+// Update already have the entity in hand); otherwise up to one
+// existing row is fetched via List (NewForm/Create, which have no
+// single entity yet).
+//
+// schemaOut is non-nil only when a real schema was found — passed to
+// resolveFormOptions for ref-link resolution, which an inferred field
+// list has no basis for (inference can't know what's a reference).
+//
+// ok is false only when there is truly nothing to build a form from:
+// no schema AND no existing data to infer from either. The caller
+// should show a clear message then, not attempt to render a
+// meaningless empty form.
+func (h *EntitiesHandler) resolveEntityFields(ctx context.Context, c *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
+	schema, schemaErr := c.GetEntitySchema(ctx, entityType)
+	switch {
+	case schemaErr == nil:
+		return schema.Fields, schema, true, nil
+	case !isNotFoundError(schemaErr):
+		return nil, nil, false, schemaErr
+	}
+
+	if known != nil {
+		return inferFieldsFromEntities([]xclient.Entity{*known}), nil, true, nil
+	}
+
+	result, err := c.List(ctx, entityType, &xclient.ListParams{Limit: 1})
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if len(result.Entities) == 0 {
+		return nil, nil, false, nil // truly nothing to infer from — not an error, a real "nothing to show yet" state
+	}
+	return inferFieldsFromEntities(result.Entities), nil, true, nil
+}
+
+// noFieldsToInferBody renders the message shown when an entity type has
+// neither a registered schema nor any existing data — there is nothing
+// for the generic form to infer fields from, and pretending otherwise
+// with an empty form would be worse than saying so plainly.
+func noFieldsToInferBody(entityType string) mi.H {
+	return func(b *mi.Builder) mi.Node {
+		return b.Div(
+			b.H1(mi.Class("text-xl font-semibold text-gray-900 dark:text-white mb-2"), "Can't build a form for "+entityType),
+			b.P(mi.Class("text-gray-600 dark:text-gray-400 text-sm"),
+				entityType+" has no registered schema and no existing rows to infer fields from — there's nothing for the generic form to work with yet. "+
+					"Create the first record directly via the API, or register a schema, then this form will work."),
+		)
+	}
+}
+
 func (h *EntitiesHandler) NewForm(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	entityType := r.PathValue("type")
@@ -322,15 +520,19 @@ func (h *EntitiesHandler) NewForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, err := c.GetEntitySchema(r.Context(), entityType)
+	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
+	if !ok {
+		WriteHTML(w, Page("New "+entityType, r.URL.Path, noFieldsToInferBody(entityType)))
+		return
+	}
 
 	basePath := "/connections/" + name + "/entities/" + entityType
-	opts := resolveFormOptions(r.Context(), c, name, schema, nil, nil)
-	body := entityFormBody("New "+entityType, basePath, schema.Fields, opts, "")
+	opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, nil, nil)
+	body := entityFormBody("New "+entityType, basePath, fields, opts, "")
 	WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
 }
 
@@ -351,9 +553,13 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, err := c.GetEntitySchema(r.Context(), entityType)
+	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	if !ok {
+		WriteHTML(w, Page("New "+entityType, r.URL.Path, noFieldsToInferBody(entityType)))
 		return
 	}
 
@@ -362,21 +568,21 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values, errs := formengine.ParseFormValues(schema.Fields, r.PostForm)
+	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargetsByField(schema))
 	basePath := "/connections/" + name + "/entities/" + entityType
 
 	if len(errs) > 0 {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		opts := resolveFormOptions(r.Context(), c, name, schema, values, errs)
-		body := entityFormBody("New "+entityType, basePath, schema.Fields, opts, "")
+		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, errs)
+		body := entityFormBody("New "+entityType, basePath, fields, opts, "")
 		WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
 		return
 	}
 
 	if _, err := c.Create(r.Context(), entityType, values); err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		opts := resolveFormOptions(r.Context(), c, name, schema, values, nil)
-		body := entityFormBody("New "+entityType, basePath, schema.Fields, opts, err.Error())
+		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, nil)
+		body := entityFormBody("New "+entityType, basePath, fields, opts, err.Error())
 		WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
 		return
 	}
@@ -406,7 +612,7 @@ func (h *EntitiesHandler) EditForm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	schema, err := c.GetEntitySchema(r.Context(), entityType)
-	if err != nil {
+	if err != nil && !isNotFoundError(err) {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
@@ -416,10 +622,17 @@ func (h *EntitiesHandler) EditForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var fields []xclient.FieldDef
+	if schema != nil {
+		fields = schema.Fields
+	} else {
+		fields = inferFieldsFromEntities([]xclient.Entity{*entity})
+	}
+
 	basePath := "/connections/" + name + "/entities/" + entityType
 	idStr := strconv.FormatInt(id, 10)
-	opts := resolveFormOptions(r.Context(), c, name, schema, formengine.Values(entity.Data), nil)
-	body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, schema.Fields, opts, "")
+	opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, formengine.Values(entity.Data), nil)
+	body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, "")
 	WriteHTML(w, Page("Edit "+entityType, r.URL.Path, body))
 }
 
@@ -442,10 +655,27 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schema, err := c.GetEntitySchema(r.Context(), entityType)
-	if err != nil {
-		writeUpstreamError(w, name, r.URL.Path, err)
+	schema, schemaErr := c.GetEntitySchema(r.Context(), entityType)
+	if schemaErr != nil && !isNotFoundError(schemaErr) {
+		writeUpstreamError(w, name, r.URL.Path, schemaErr)
 		return
+	}
+
+	var fields []xclient.FieldDef
+	if schema != nil {
+		fields = schema.Fields
+	} else {
+		// No schema — infer from the specific row being edited, not an
+		// arbitrary one, since its exact field set is what the
+		// submission should be parsed against. A fetch failure here
+		// (e.g. the row was deleted between EditForm and this
+		// submission) is a real error, not "nothing to work with."
+		current, err := c.Get(r.Context(), entityType, id)
+		if err != nil {
+			writeUpstreamError(w, name, r.URL.Path, err)
+			return
+		}
+		fields = inferFieldsFromEntities([]xclient.Entity{*current})
 	}
 
 	if err := r.ParseForm(); err != nil {
@@ -453,22 +683,22 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values, errs := formengine.ParseFormValues(schema.Fields, r.PostForm)
+	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargetsByField(schema))
 	basePath := "/connections/" + name + "/entities/" + entityType
 	idStr := strconv.FormatInt(id, 10)
 
 	if len(errs) > 0 {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		opts := resolveFormOptions(r.Context(), c, name, schema, values, errs)
-		body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, schema.Fields, opts, "")
+		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, errs)
+		body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, "")
 		WriteHTML(w, Page("Edit "+entityType, r.URL.Path, body))
 		return
 	}
 
 	if _, err := c.Update(r.Context(), entityType, id, values); err != nil {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		opts := resolveFormOptions(r.Context(), c, name, schema, values, nil)
-		body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, schema.Fields, opts, err.Error())
+		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, nil)
+		body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, err.Error())
 		WriteHTML(w, Page("Edit "+entityType, r.URL.Path, body))
 		return
 	}

@@ -46,6 +46,8 @@ func New(store connstore.Store) http.Handler {
 	reg := modules.NewRegistry()
 	ui.RegisterConnectionsModule(reg, store)
 	ui.RegisterEntitiesModule(reg, store)
+	ui.RegisterBlobsModule(reg, store)
+	ui.RegisterQueryModule(reg, store)
 	reg.MountAll(mux)
 
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
