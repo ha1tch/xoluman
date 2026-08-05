@@ -50,15 +50,29 @@ func ListPage(cfg ListPageConfig, content mi.H) mi.H {
 // emptyMessage in an empty-state block when rows is empty. Rows are
 // typically built with TableRow (or hand-built b.Tr(...) calls) by the
 // caller — Table itself only assembles the shell.
+// Table wraps rows in the visual conventions minty's own Tailwind
+// theme establishes for a data table (themes/tailwind/tailwind.go's
+// Table()) — a real elevated card (shadow, subtle ring, rounded
+// corners), a distinct header background with uppercase tracked text,
+// and striped rows — none of which xoluman's own implementation had
+// adopted before this, despite depending on minty throughout. A real
+// gap, not a style preference: reported directly as looking "too
+// default, no signs of styling attempts."
+//
+// Striping is applied via a Tailwind arbitrary-variant selector on
+// <tbody> targeting even child rows, rather than requiring every
+// caller to stripe its own <tr> elements — every one of the many
+// call sites across this codebase gets it automatically, not just
+// whichever ones remember to ask.
 func Table(columns []string, rows []mi.Node, emptyMessage string) mi.H {
 	return func(b *mi.Builder) mi.Node {
 		if len(rows) == 0 {
-			return b.Div(mi.Class("text-center py-12 text-gray-500 dark:text-gray-400"), emptyMessage)
+			return b.Div(mi.Class("text-center py-12 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700"), emptyMessage)
 		}
 
 		headerCells := make([]interface{}, len(columns))
 		for i, c := range columns {
-			headerCells[i] = b.Th(mi.Class("text-left px-3 py-2 border-b border-gray-200 dark:border-gray-700 text-sm font-medium text-gray-500 dark:text-gray-400"), c)
+			headerCells[i] = b.Th(mi.Class("px-3 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider"), c)
 		}
 
 		rowArgs := make([]interface{}, len(rows))
@@ -66,9 +80,11 @@ func Table(columns []string, rows []mi.Node, emptyMessage string) mi.H {
 			rowArgs[i] = r
 		}
 
-		return b.Table(mi.Class("w-full border-collapse"),
-			b.Thead(b.Tr(headerCells...)),
-			b.Tbody(rowArgs...),
+		return b.Div(mi.Class("overflow-hidden shadow-sm ring-1 ring-black/5 dark:ring-white/10 rounded-lg"),
+			b.Table(mi.Class("w-full border-collapse"),
+				b.Thead(mi.Class("bg-gray-50 dark:bg-gray-800/60 border-b border-gray-200 dark:border-gray-700"), b.Tr(headerCells...)),
+				b.Tbody(append([]interface{}{mi.Class("[&>tr:nth-child(even)]:bg-gray-50 dark:[&>tr:nth-child(even)]:bg-gray-800/40")}, rowArgs...)...),
+			),
 		)
 	}
 }
@@ -85,6 +101,34 @@ func ModalTriggerButton(buttonLabel, modalTitle, url, class string) mi.H {
 			mi.HxGet(url), mi.HxTarget("#modal-body"), mi.HxSwap("innerHTML"),
 			mi.Attr("onclick", "XModal.open('"+modalTitle+"')"),
 			buttonLabel,
+		)
+	}
+}
+
+// lightningIconSVG is a small bolt icon, matching the outline style
+// (stroke="currentColor", no fill) minty's own DarkModeSVGIcons use —
+// a real icon, not a text glyph, per the same lesson the theme toggle
+// itself needed applied here directly.
+const lightningIconSVG = `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`
+
+// RefJumpButton opens a ref field's linked entity directly in a modal
+// — a real, requested navigation shortcut: previously the only way to
+// look at what a reference actually points to was the ref link itself,
+// a full page navigation away from wherever it was clicked. The
+// button's own hx-get title param is a placeholder ("Loading…") —
+// modal.js's own htmx:afterSwap listener promotes the loaded form's
+// real <h1> to the modal's title bar once it arrives, the same
+// mechanism every other modal-opened form already uses, so this
+// doesn't need to know the specific title in advance.
+func RefJumpButton(editURL string) mi.H {
+	return func(b *mi.Builder) mi.Node {
+		return b.Button(
+			mi.Type("button"),
+			mi.Class("inline-flex items-center ml-1 text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer border-0 bg-transparent p-0 align-middle"),
+			mi.Attr("title", "Open in a modal"),
+			mi.HxGet(editURL), mi.HxTarget("#modal-body"), mi.HxSwap("innerHTML"),
+			mi.Attr("onclick", "XModal.open('Loading…')"),
+			mi.Raw(lightningIconSVG),
 		)
 	}
 }

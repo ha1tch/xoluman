@@ -71,6 +71,24 @@ class XoluQueryEditor extends LitElement {
     // plain form inputs, not editable code.
     this._restMethod = 'GET';
     this._restPath = '';
+    // Recent queries: local, ephemeral, per browser — the last N run
+    // per mode, most recent first, kept in localStorage (safe here,
+    // unlike inside a Claude-generated artifact: this is a real
+    // xoluman-authored component, not subject to that sandbox's own
+    // restriction). Keyed by connection (derived from runUrl, which
+    // is already per-connection) + mode, so switching connections
+    // doesn't mix histories together.
+    this._recentByMode = { oql: [], sulpher: [], rest: [] };
+    // Saved queries: explicit, named, server-backed (see
+    // internal/ui/query.go's savedQuery API) — deliberately the
+    // opposite persistence choice from recent queries: a saved query
+    // is a deliberate, shared artifact, visible to anyone else using
+    // xoluman against the same xolu instance, not a private browser
+    // history.
+    this._savedByMode = { oql: [], sulpher: [], rest: [] };
+    this._showSaveForm = false;
+    this._saveNameDraft = '';
+    this._selectedSavedId = null;
   }
 
   firstUpdated() {
@@ -94,6 +112,152 @@ class XoluQueryEditor extends LitElement {
       this._view.dispatch({ effects: this._themeConf.reconfigure(this._themeExtensionFor()) });
     });
     this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+    this._loadRecentFromStorage();
+    this._fetchAllSaved();
+  }
+
+  // savedUrl is derived from run-url rather than a second attribute —
+  // internal/ui/query.go registers both under the same
+  // /connections/{name}/query/... prefix, so the relationship is
+  // structural, not something the caller needs to state twice.
+  get _savedUrl() {
+    return this.runUrl.replace(/\/run$/, '/saved');
+  }
+
+  get _recentStorageKey() {
+    // The run URL already encodes the connection name
+    // (/connections/{name}/query/run) — reusing it as the localStorage
+    // namespace means recent-query history is automatically scoped
+    // per connection without parsing the name back out separately.
+    return 'xolu-recent-queries:' + this.runUrl;
+  }
+
+  _loadRecentFromStorage() {
+    try {
+      const raw = localStorage.getItem(this._recentStorageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        for (const m of MODES) {
+          if (Array.isArray(parsed[m])) this._recentByMode[m] = parsed[m];
+        }
+      }
+    } catch (e) {
+      // Storage unavailable or corrupt — start empty rather than
+      // breaking the editor over a history feature.
+    }
+    this.requestUpdate();
+  }
+
+  _saveRecentToStorage() {
+    try {
+      localStorage.setItem(this._recentStorageKey, JSON.stringify(this._recentByMode));
+    } catch (e) {
+      // Storage full or unavailable — the current session's history
+      // still works via _recentByMode in memory, just won't persist.
+    }
+  }
+
+  // _pushRecent records a query that was actually run — called from
+  // _run() on any completed request, success or failure, since even a
+  // failed query is one someone might want to pull back up and fix
+  // rather than retype from scratch.
+  _pushRecent(mode, entry) {
+    const list = this._recentByMode[mode];
+    // De-duplicate: an identical query bubbles to the front rather
+    // than appearing twice in the history.
+    const key = JSON.stringify(entry);
+    const withoutDup = list.filter((e) => JSON.stringify(e) !== key);
+    withoutDup.unshift(entry);
+    this._recentByMode[mode] = withoutDup.slice(0, 15);
+    this._saveRecentToStorage();
+    this.requestUpdate();
+  }
+
+  async _fetchAllSaved() {
+    for (const m of MODES) {
+      try {
+        const resp = await fetch(this._savedUrl + '?mode=' + m);
+        if (!resp.ok) continue;
+        this._savedByMode[m] = await resp.json();
+      } catch (e) {
+        // A saved-query fetch failing shouldn't block the editor
+        // itself from being usable — that list just stays empty.
+      }
+    }
+    this.requestUpdate();
+  }
+
+  // _loadEntry applies a recent or saved entry to the current editor
+  // state — the query text (or, for REST, method+path+body) — without
+  // switching modes; both listboxes are already scoped to the active
+  // mode, so applying one implies "into what's currently open."
+  _loadEntry(entry) {
+    if (this._mode === 'rest') {
+      this._restMethod = entry.method || 'GET';
+      this._restPath = entry.path || '';
+    }
+    const doc = this._mode === 'rest' ? entry.body || '' : entry.query || '';
+    this._view.dispatch({
+      changes: { from: 0, to: this._view.state.doc.length, insert: doc },
+    });
+    this._result = null;
+    this._error = null;
+    this.requestUpdate();
+  }
+
+  async _saveCurrentQuery() {
+    const name = this._saveNameDraft.trim();
+    if (!name) return;
+    const query = this._view.state.doc.toString();
+    const payload = { mode: this._mode, name };
+    if (this._mode === 'rest') {
+      payload.method = this._restMethod;
+      payload.path = this._restPath;
+      payload.contentType = 'application/json';
+      payload.body = query;
+    } else {
+      payload.query = query;
+    }
+    try {
+      const resp = await fetch(this._savedUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (resp.ok) {
+        const listResp = await fetch(this._savedUrl + '?mode=' + this._mode);
+        if (listResp.ok) this._savedByMode[this._mode] = await listResp.json();
+      }
+    } catch (e) {
+      // Best-effort — the query the person typed is still sitting in
+      // the editor either way, nothing is lost by a save failing.
+    }
+    this._showSaveForm = false;
+    this._saveNameDraft = '';
+    this.requestUpdate();
+  }
+
+  async _deleteSaved(id) {
+    try {
+      await fetch(this._savedUrl + '/' + id, { method: 'DELETE' });
+      this._savedByMode[this._mode] = this._savedByMode[this._mode].filter((s) => s.id !== id);
+      this.requestUpdate();
+    } catch (e) {
+      // Best-effort — the entry just stays in the list if this fails,
+      // no different from before the click.
+    }
+  }
+
+  // _describeEntry builds a short, single-line label for a recent
+  // (unnamed) history entry's dropdown option — saved entries already
+  // have a real name a person gave them, so this is only used for the
+  // Recent list. Truncated: a dropdown option isn't the place for a
+  // multi-line query to be read in full, just recognised.
+  _describeEntry(entry) {
+    const text = this._mode === 'rest' ? `${entry.method || 'GET'} ${entry.path || ''}` : entry.query || '';
+    const oneLine = text.replace(/\s+/g, ' ').trim();
+    return oneLine.length > 60 ? oneLine.slice(0, 57) + '…' : oneLine || '(empty)';
   }
 
   disconnectedCallback() {
@@ -124,6 +288,8 @@ class XoluQueryEditor extends LitElement {
     this._mode = mode;
     this._result = null;
     this._error = null;
+    this._showSaveForm = false;
+    this._saveNameDraft = '';
     if (this._view) {
       this._view.setState(
         EditorState.create({
@@ -152,6 +318,9 @@ class XoluQueryEditor extends LitElement {
       payload.path = this._restPath;
       payload.contentType = 'application/json';
       payload.body = query; // REST mode's editor holds the request body (JSON), path/method come from the form fields above it
+    }
+    if (query.trim()) {
+      this._pushRecent(this._mode, this._mode === 'rest' ? { method: this._restMethod, path: this._restPath, body: query } : { query });
     }
 
     try {
@@ -207,6 +376,34 @@ class XoluQueryEditor extends LitElement {
         }
         .xolu-query-run-btn:disabled { background: #a5b4fc; cursor: default; }
         .dark .xolu-query-run-btn:disabled { background: #4338ca; color: #c7d2fe; }
+        .xolu-query-history-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; align-items: center; }
+        .xolu-query-history-select {
+          flex: 1; min-width: 0; padding: 0.35rem 0.5rem; border: 1px solid #d1d5db; border-radius: 0.375rem;
+          font-size: 0.8125rem; background: #fff; color: #111827;
+        }
+        .dark .xolu-query-history-select { border-color: #374151; background: #1f2937; color: #f3f4f6; }
+        .xolu-query-history-delete {
+          padding: 0.25rem 0.55rem; font-size: 0.9rem; line-height: 1; border-radius: 0.375rem;
+          border: 1px solid #fecaca; background: #fef2f2; color: #b91c1c; cursor: pointer;
+        }
+        .dark .xolu-query-history-delete { border-color: rgba(248, 113, 113, 0.3); background: rgba(127, 29, 29, 0.3); color: #f87171; }
+        .xolu-query-actions-row { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.75rem; }
+        .xolu-query-save-btn {
+          padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500; border-radius: 0.5rem;
+          border: 1px solid #d1d5db; background: #fff; color: #374151; cursor: pointer;
+        }
+        .dark .xolu-query-save-btn { border-color: #374151; background: #1f2937; color: #f3f4f6; }
+        .xolu-query-save-name {
+          padding: 0.5rem 0.75rem; font-size: 0.875rem; border: 1px solid #d1d5db; border-radius: 0.5rem;
+          background: #fff; color: #111827; min-width: 12rem;
+        }
+        .dark .xolu-query-save-name { border-color: #374151; background: #1f2937; color: #f3f4f6; }
+        .xolu-query-save-confirm {
+          padding: 0.5rem 1rem; font-size: 0.875rem; font-weight: 500; border-radius: 0.5rem;
+          border: none; cursor: pointer; background: #4f46e5; color: #fff;
+        }
+        .xolu-query-save-confirm:disabled { background: #a5b4fc; cursor: default; }
+        .dark .xolu-query-save-confirm:disabled { background: #4338ca; color: #c7d2fe; }
         .xolu-query-result { margin-top: 1rem; padding: 0.75rem; background: #f9fafb; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; max-height: 400px; overflow: auto; color: #111827; }
         .dark .xolu-query-result { background: #1f2937; color: #f3f4f6; }
         .xolu-query-error { margin-top: 1rem; padding: 0.75rem; background: #fef2f2; color: #b91c1c; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; }
@@ -220,6 +417,44 @@ class XoluQueryEditor extends LitElement {
             </div>
           `
         )}
+      </div>
+      <div class="xolu-query-history-row">
+        <select
+          class="xolu-query-history-select"
+          @change=${(e) => {
+            const i = Number(e.target.value);
+            e.target.value = '';
+            if (!Number.isNaN(i) && this._recentByMode[this._mode][i]) this._loadEntry(this._recentByMode[this._mode][i]);
+          }}
+        >
+          <option value="">Recent…</option>
+          ${this._recentByMode[this._mode].map((entry, i) => html`<option value=${i}>${this._describeEntry(entry)}</option>`)}
+        </select>
+        <select
+          class="xolu-query-history-select"
+          .value=${this._selectedSavedId || ''}
+          @change=${(e) => {
+            const id = Number(e.target.value);
+            this._selectedSavedId = id || null;
+            const entry = this._savedByMode[this._mode].find((s) => s.id === id);
+            if (entry) this._loadEntry(entry);
+          }}
+        >
+          <option value="">Saved…</option>
+          ${this._savedByMode[this._mode].map((s) => html`<option value=${s.id}>${s.name}</option>`)}
+        </select>
+        ${this._selectedSavedId
+          ? html`<button
+              class="xolu-query-history-delete"
+              title="Delete this saved query"
+              @click=${() => {
+                this._deleteSaved(this._selectedSavedId);
+                this._selectedSavedId = null;
+              }}
+            >
+              ×
+            </button>`
+          : ''}
       </div>
       ${this._mode === 'rest'
         ? html`
@@ -242,9 +477,30 @@ class XoluQueryEditor extends LitElement {
           `
         : ''}
       <div class="xolu-query-editor-mount"></div>
-      <button class="xolu-query-run-btn" ?disabled=${this._running} @click=${this._run}>
-        ${this._running ? 'Running…' : 'Run'}
-      </button>
+      <div class="xolu-query-actions-row">
+        <button class="xolu-query-run-btn" ?disabled=${this._running} @click=${this._run}>
+          ${this._running ? 'Running…' : 'Run'}
+        </button>
+        <button class="xolu-query-save-btn" @click=${() => (this._showSaveForm = !this._showSaveForm)}>Save…</button>
+        ${this._showSaveForm
+          ? html`
+              <input
+                type="text"
+                class="xolu-query-save-name"
+                placeholder="Name this query"
+                .value=${this._saveNameDraft}
+                @input=${(e) => (this._saveNameDraft = e.target.value)}
+                @keydown=${(e) => {
+                  if (e.key === 'Enter') this._saveCurrentQuery();
+                  if (e.key === 'Escape') this._showSaveForm = false;
+                }}
+              />
+              <button class="xolu-query-save-confirm" ?disabled=${!this._saveNameDraft.trim()} @click=${this._saveCurrentQuery}>
+                Save
+              </button>
+            `
+          : ''}
+      </div>
       ${this._error ? html`<div class="xolu-query-error">${this._error}</div>` : ''}
       ${this._result ? html`<div class="xolu-query-result">${this._result}</div>` : ''}
     `;

@@ -16,6 +16,7 @@ import (
 	xclient "github.com/ha1tch/xolu/pkg/client"
 
 	"github.com/ha1tch/xoluman/internal/connstore"
+	"github.com/ha1tch/xoluman/internal/fieldmeta"
 )
 
 // gridPage wraps body in the shared page shell plus what the grid
@@ -49,9 +50,20 @@ func gridPage(title, activePath string, body mi.H) mi.H {
 // correctness — the response/request contract; editor names here are
 // standard, long-stable Tabulator features).
 type gridColumn struct {
-	Title  string `json:"title"`
-	Field  string `json:"field"`
-	Editor any    `json:"editor"` // string editor name, or false to disable editing on this column
+	Title        string `json:"title"`
+	Field        string `json:"field"`
+	Editor       any    `json:"editor"` // string editor name, or false to disable editing on this column
+	EditorParams any    `json:"editorParams,omitempty"`
+}
+
+// listEditorParams is the "list" editor's config shape for its
+// dropdown choices — a plain {value: label} object, confirmed against
+// the vendored Tabulator source directly (not assumed from docs) when
+// T-15 first scoped this. Kept as its own type rather than an inline
+// map literal so buildGridColumns' intent (a select field, not a free
+// text input) is visible at the call site.
+type listEditorParams struct {
+	Values map[string]string `json:"values"`
 }
 
 // buildGridColumns derives Tabulator column definitions from an entity
@@ -60,10 +72,28 @@ type gridColumn struct {
 // cap, a grid meant for bulk editing shows everything there is to
 // edit). The id column is always first and never editable — entity
 // identity, not a value to change.
-func buildGridColumns(fields []xclient.FieldDef) []gridColumn {
+//
+// fieldOptions carries any xoluman_field_meta dropdown configuration
+// for this entity type (same source resolveFormOptions already uses
+// for the entity form's own select fields) — a configured field gets
+// Tabulator's "list" editor instead of a bare text input, matching
+// the entity form's own dropdown for the identical field rather than
+// letting the grid be the one place that still shows a raw value.
+func buildGridColumns(fields []xclient.FieldDef, fieldOptions map[string][]fieldmeta.Option) []gridColumn {
 	cols := []gridColumn{{Title: "ID", Field: "id", Editor: false}}
 	for _, f := range fields {
 		if f.Type == "object" || f.Type == "array" {
+			continue
+		}
+		if opts, ok := fieldOptions[f.Name]; ok && len(opts) > 0 {
+			values := make(map[string]string, len(opts))
+			for _, o := range opts {
+				values[o.Key] = o.Value
+			}
+			cols = append(cols, gridColumn{
+				Title: f.Name, Field: f.Name, Editor: "list",
+				EditorParams: listEditorParams{Values: values},
+			})
 			continue
 		}
 		editor := "input"
@@ -89,7 +119,7 @@ func (h *EntitiesHandler) GridView(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	entityType := r.PathValue("type")
 
-	schemaClient, err := h.schemaClientFor(r.Context(), name)
+	c, err := h.clientFor(r.Context(), name)
 	if err != nil {
 		if errors.Is(err, connstore.ErrNotFound) {
 			writeConnectionNotFound(w, name)
@@ -98,13 +128,26 @@ func (h *EntitiesHandler) GridView(w http.ResponseWriter, r *http.Request) {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
-	schema, err := schemaClient.GetEntitySchema(r.Context(), entityType)
+	schema, err := c.GetEntitySchema(r.Context(), entityType)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
 
-	columns := buildGridColumns(schema.Fields)
+	// Same xoluman_field_meta lookup resolveFormOptions already does
+	// for the entity form's own select fields — best-effort, a lookup
+	// failure just means every field renders as a plain text input in
+	// the grid, same as before this existed, not a page-level error.
+	fieldOptions := map[string][]fieldmeta.Option{}
+	if metas, err := fieldmeta.LoadForEntityType(r.Context(), c, schema.Name); err == nil {
+		for fieldName, m := range metas {
+			if resolved, err := fieldmeta.ResolveOptions(r.Context(), c, m); err == nil {
+				fieldOptions[fieldName] = resolved
+			}
+		}
+	}
+
+	columns := buildGridColumns(schema.Fields, fieldOptions)
 	columnsJSON, err := json.Marshal(columns)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)

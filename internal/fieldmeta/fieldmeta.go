@@ -205,3 +205,48 @@ func ResolveOptions(ctx context.Context, c *client.Client, m Meta) ([]Option, er
 	}
 	return decodeOptions(raw)
 }
+
+// RememberRefTarget saves the entity type a person specified for a ref
+// field whose schema doesn't declare one — so the next time anyone
+// edits that same field, on any row, it's known without asking again.
+// Same bookkeeping-entity mechanism as the rest of this package, a new
+// OptionKind ("ref-target") rather than overloading "ref" (which means
+// something different: where a *select* field's options come from, not
+// a ref field's own target).
+//
+// Real gap this closes: xolu's embedded read-shape for a ref value
+// doesn't self-identify its target entity type (confirmed directly,
+// not assumed), so there was no way to pre-fill the companion
+// entity-type input on a plain read — every edit of an undeclared-
+// target ref field required re-typing the entity type, which is what
+// was actually blocking saves in practice. Once remembered here, it's
+// treated the same as a schema-declared target from then on.
+//
+// Idempotent in spirit, not in mechanism: writes a new document each
+// call rather than checking for and updating an existing one (this
+// package has no update-if-exists path yet, and Client.List has no
+// filter to check cheaply) — callers should only call this when the
+// value actually differs from what LookupRememberedTarget already
+// returns, not on every single save.
+func RememberRefTarget(ctx context.Context, c *client.Client, entityType, fieldName, targetEntity string) error {
+	_, err := c.Create(ctx, EntityType, map[string]any{
+		"entity_type": entityType,
+		"field_name":  fieldName,
+		"option_kind": "ref-target",
+		"ref_entity":  targetEntity,
+	})
+	return err
+}
+
+// LookupRememberedTarget returns the remembered target entity type for
+// fieldName from an already-loaded metas map (LoadForEntityType), if
+// one was saved via RememberRefTarget. Distinct from a "ref"-kind
+// Meta's own RefEntity, which means something else (where a select
+// field's options come from) — only a "ref-target" kind counts here.
+func LookupRememberedTarget(metas map[string]Meta, fieldName string) (string, bool) {
+	m, ok := metas[fieldName]
+	if !ok || m.OptionKind != "ref-target" || m.RefEntity == "" {
+		return "", false
+	}
+	return m.RefEntity, true
+}

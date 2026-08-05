@@ -2,6 +2,448 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.7.3] — 2026-08-05
+
+- **T-14 closed** (see `docs/RESOLVED.md`): the FSM def module — a
+  full visual viewer and editor, not the read-only version originally
+  scoped, per direct request.
+  - `internal/ui/fsmdef.go`: full CRUD (List, New/Edit shell, GetData,
+    Create, Update, Delete) against `client.CreateMachineDef`/
+    `ReplaceMachineDef`/`DeleteMachineDef`, using the real
+    `MachineSpec`/`TransitionDef` wire shape directly — every field
+    (guard, output, variable `Set`), not a lossy collapse into one
+    label the way Seam's own canvas engine was found to do in an
+    earlier assessment of reusing it.
+  - **Validate before submission**, via `github.com/ha1tch/fsm-toolkit`:
+    converts a `MachineSpec` into fsm-toolkit's own `*fsm.FSM` (states,
+    initial state, and transitions map cleanly; guards, variable `Set`
+    clauses, GC policy, and input queries don't, and are surfaced as
+    explicit skipped-check notes rather than silently ignored) and
+    runs `Validate()`/`Analyse()` — debounced, live, zero network
+    calls to xolu. Complementary to xolu's own `ValidateMachineDef`,
+    not a replacement for it.
+  - **Visual-diagram persistence**, following fsm-toolkit's own
+    `fsmedit` separation (`pkg/fsmfile.Layout` — position data kept
+    structurally apart from the abstract machine) — a new
+    `xoluman_fsm_layout` bookkeeping entity, same established pattern
+    as `xoluman_field_meta`, not fsmedit's own zip+hex+TOML file
+    format (built for local files on a TUI tool, not a web app
+    talking to a remote xolu instance).
+  - `web/static/js/fsm-editor.js`: a real SVG canvas — draggable
+    states, transition arrows (including self-loops), a live
+    validation panel.
+  - **Three real bugs found and fixed only by actually running it
+    (Playwright), none visible from reading the code**: a panic on
+    the list page from passing an uncalled `mi.H` render function as
+    a child instead of invoking it; transition `from` fields
+    double-JSON-encoded; and — the significant one — the entire SVG
+    canvas rendering in the wrong DOM namespace, because nested
+    per-state/per-transition sub-templates used Lit's `html` tag
+    instead of its dedicated `svg` tag, silently turning `<circle>`/
+    `<path>`/`<text>` into unrecognized HTML elements with zero
+    bounding boxes and no working drag. Confirmed via `getBBox()`
+    (didn't exist) and `namespaceURI` (`xhtml`, not `svg`) before
+    fixing it, then verified after with a real drag-and-persist round
+    trip — dragged a state, re-fetched the layout from the server,
+    confirmed the actual new coordinates.
+  - Also fixed along the way: the new JSON API endpoints
+    (Create/Update/Delete/GetData/ValidateLocal/SaveLayout) were
+    returning `writeUpstreamError`'s full HTML error page on
+    failure — correct for page handlers, broken for a JS component
+    reading `fetch()` responses as JSON — given a dedicated
+    `writeUpstreamErrorJSON` path instead of touching the shared,
+    page-handler-wide function.
+  - Known, disclosed limitation, not a bug: two transitions between
+    the same state pair draw overlapping labels at the same midpoint
+    — a curve-apart fix, not attempted this pass.
+  - 10 new Go tests for the converter/validation logic. Full CRUD —
+    create, read, update, delete, local validation, layout save —
+    verified end-to-end against a real xolu instance, not just
+    unit-tested.
+
+## [0.7.2] — 2026-08-04
+
+- **T-15 closed** (see `docs/RESOLVED.md`) — grid select-field support
+  was the last open piece. `buildGridColumns` now consumes
+  `xoluman_field_meta` the same way the entity form's own select
+  fields already do: a configured field gets Tabulator's `list`
+  editor with the real value→label mapping, instead of a bare text
+  input. Verified end-to-end, not just unit-tested: a real
+  `field_meta` entry, a real edit through the dropdown, a real save,
+  and a direct API check confirming the value actually changed
+  (`small` → `enterprise`) — checked in both light and dark mode. 5
+  new tests.
+- **T-21 closed** (see previous entry, v0.7.1) — register housekeeping
+  only, already resolved in practice.
+
+## [0.7.1] — 2026-08-04
+
+- **T-21 closed** (see `docs/RESOLVED.md`) — was already resolved in
+  practice as of the v0.27.0 integration pass (`Client.TestConnection()`
+  wired into both `Test`/`TestUnsaved` handlers), just never formally
+  closed in the register. No code change this release; register/docs
+  housekeeping only.
+
+## [0.7.0] — 2026-08-04
+
+Minor bump, not a patch — a genuine architectural change (the header
+redesign) and a new feature (lightning-icon navigation) alongside a
+long list of real bugs found and fixed, several only catchable by
+actually running a browser rather than reading source. Playwright
+(browser automation) turned out to be available in this sandbox and
+was used throughout this pass — screenshots, click-throughs, computed-
+style inspection — which is how most of what follows was actually
+found, not assumed from code.
+
+- **The real fix for "saving is broken" (T-24's remaining half)**:
+  a ref field whose schema doesn't declare a target had no way to be
+  written to more than once, since the companion entity-type input
+  could never be pre-filled from a plain read (xolu's embedded
+  read-shape doesn't self-identify its own entity type). Fixed
+  properly: extended the existing `xoluman_field_meta` bookkeeping
+  pattern (`fieldmeta.RememberRefTarget`/`LookupRememberedTarget`) so
+  a target is remembered the first time it's specified and auto-fills
+  for every future edit of that field, on any row. Verified
+  end-to-end across two different rows — type it once, never again.
+  A related, smaller gap fixed in the same pass: the list preview and
+  the form's own ref-link building both still only checked
+  schema-declared targets, not remembered ones, so a remembered field
+  wouldn't show a ref link (or the new lightning icon) at all — both
+  now use the same expanded, memory-aware lookup.
+
+- **Modal title consolidation** — a fragment's own `<h1>` (e.g. "Edit
+  companies #1") is now promoted to the modal's title bar and removed
+  from the body, replacing the less specific static title the trigger
+  button set at click time. One centralized fix (`modal.js`'s own
+  `htmx:afterSwap` listener) rather than coordinating title text
+  between every Go handler and its trigger button.
+
+  **Found and fixed two real, related bugs building this feature, both
+  only catchable by actually clicking through it:**
+  - The first attempt listened on `document.body`, which doesn't
+    exist yet when `modal.js` runs (a synchronous `<script src>` in
+    `<head>`, executing before `<body>` is parsed) — an uncaught
+    exception that silently broke `XModal`'s entire IIFE, meaning
+    *every* modal (New/Edit/Delete) would have stopped working.
+    Fixed: listen on `document` instead.
+  - Building the lightning-icon feature (below) surfaced a second,
+    related bug in `XModal.open()` itself: opening a new modal from
+    *within* an already-open one (the lightning icon's exact use
+    case) destroyed the current modal's DOM — including the very
+    button whose click triggered the open — before htmx's own click
+    handler on that same element could fire its request, so the
+    request silently never happened. A second attempt (leaving the
+    modal alone but resetting `#modal-body`'s own `textContent`) made
+    the identical mistake one level down, since the button lives
+    inside `#modal-body` too. Fixed properly: `open()` no longer
+    touches `#modal-body`'s content synchronously at all when reusing
+    an existing modal — the old content stays visible until htmx's
+    own swap replaces it once the response actually arrives.
+
+- **Header redesign** — the persistent left sidebar (shipped last
+  pass) is gone, reported directly as looking bad where it was.
+  Replaced with: the connection name genuinely centered in the nav bar
+  (confirmed pixel-exact via Playwright, not just visually plausible),
+  a native `<details>`/`<summary>` dropdown menu (Entities/Blobs/
+  Query/DXP, All connections, a connection switcher) — zero additional
+  JS, browser-native open/close, deliberately not a second custom JS
+  component to get subtly wrong the way `modal.js` just was — and the
+  theme toggle repositioned to the top right. The old registry-driven
+  top-level nav-links mechanism (unused in practice — no module had
+  ever set a Label) was retired along with its tests.
+
+- **Theme toggle visibility — found and fixed, likely the real
+  explanation for "we lost the theme switcher, it's always dark."**
+  The toggle mechanism itself tested correctly in every scenario
+  across multiple sessions. The actual bug only showed up in an actual
+  screenshot: `mi.DarkModeSVGIcons()`'s icon markup (`class="w-5
+  h-5"`) is generated inside minty's own library code, outside
+  Tailwind's content-scanning paths (`./internal/**/*.go`), so no CSS
+  was ever generated for those classes — the icon rendered at zero
+  size. Functionally clickable the whole time, but invisible; if you
+  can't find the button, you can't toggle it, and a dark OS preference
+  would then look permanently stuck. Fixed with a Tailwind `safelist`
+  entry, documented for why, and confirmed visible in a real
+  screenshot afterward.
+
+- **Grid dark mode — root-caused properly, not re-patched.** A
+  screenshot revealed the real problem: Tabulator's own selectors are
+  frequently 3-class compounds (e.g. `.tabulator .tabulator-header
+  .tabulator-col`) that beat a 2-class override (`.dark
+  .tabulator-col`) on CSS specificity regardless of source order — the
+  first version of the override file only had `!important` on two
+  rules, added ad hoc, and was silently losing to Tabulator's own
+  light-theme defaults almost everywhere else. Rewrote the whole file
+  with `!important` throughout — the correct, deliberate pattern for a
+  dedicated third-party override file, not a shortcut — plus several
+  previously-missing selectors (`.tabulator-table`, the pagination
+  footer's page buttons, `.tabulator-col-title`). Also found and fixed
+  a **pre-existing light-mode bug** in the same pass, same root cause:
+  an empty gray area below the last row in light mode too (Tabulator's
+  base `background:#888` showing through). Both themes fully verified
+  via screenshot, not just computed-style spot checks.
+
+- **Lightning-icon ref navigation** — a small SVG bolt icon next to
+  ref links (both the entity list preview and inside edit forms) that
+  opens the linked entity in a modal instead of a full-page
+  navigation. Verified end-to-end: clicked it for real, confirmed the
+  request fires, the modal title updates to the linked entity's own
+  title, and the body genuinely shows the linked entity's own fields
+  (not the original one again). Breadcrumbs and side-by-side viewing,
+  both mentioned as possible directions, are deliberately out of scope
+  for this pass.
+
+## [0.6.23] — 2026-08-04
+
+- **xolu v0.27.0 integrated — the xolu team's response to
+  `docs/xolu-requests.md`, all claims verified directly against
+  source before trusting them, not taken on the letter's word alone.**
+  T-23 and T-24 closed (see `docs/RESOLVED.md`).
+  - **T-23 (tenant-scoped schema-endpoint prefixing): already fixed,
+    in v0.26.2, before the letter even arrived.** Confirmed directly —
+    `buildURLRoot` now exists, `GetEntitySchema`/`DefineEntitySchema`/
+    the schema-list call all correctly skip the tenant prefix.
+    `xoluext.BuildSchemaClient()` and `schemaClientFor` removed
+    entirely; all 6 call sites reverted to the regular client. 2
+    obsolete tests replaced with one confirming the *regular* client
+    now handles this correctly on its own.
+  - **T-24 (the real "saving is broken" cause): xolu's diagnosis
+    corrected ours.** Our own working theory (undeclared ref target)
+    reproduced the symptom but was wrong about the cause — a plain
+    schema with no ref fields at all reproduced the identical failure.
+    Real cause: `PUT`/`PATCH`/`save` validated a document that already
+    contained `id` (and `_version` for `PATCH`) — system fields no
+    schema declares — against `additionalProperties:false`. Fixed
+    server-side (`stripSystemFieldsForValidation`); verified
+    independently with a direct, correctly-shaped `PUT` against the
+    exact `examples/crm` repro.
+  - **A second, entirely separate bug found once T-24's fix was
+    verified — xoluman's own, nothing to do with xolu.** Updating
+    `companies` through xoluman's own web form *still* failed after
+    the id/_version fix, because the form submitted a bare number for
+    any ref field whose schema doesn't declare a target (confirmed:
+    exactly what `examples/crm`'s own seed script does for every ref
+    field except `users`'). Affected both create and update
+    identically. **Fixed properly**: `formengine.RenderOptions` gained
+    `RefTargets`; `refInput` now renders a companion
+    `f.Name+"__ref_entity"` input specifically when a ref field's
+    target is unknown, letting the person supply it directly;
+    `ParseFormValues` uses it to build the real
+    `{type,entity,id}` shape. Degrades honestly to the old
+    bare-number behavior (and xolu's own clear rejection) when left
+    blank — no silent guessing. Pre-fills correctly when redisplaying
+    after a validation error, from the write-shape's own `entity`
+    field. 9 new tests across `formengine`/`formengine_test`/
+    `parse_test`. **Verified end-to-end through xoluman's actual web
+    form** against the real CRM demo — both create and update now
+    genuinely succeed, confirmed persisted in the real data, not just
+    each half in isolation.
+  - **A severe bug found while verifying #5 below, fixed on both
+    sides**: `apikey` auth mode sent `Authorization: Bearer <key>`
+    since the option existed; the server's own validator only ever
+    accepted `X-API-Key`/`Authorization: ApiKey <key>`. Every
+    `apikey`-configured client was silently unauthenticated on every
+    request. Confirmed empirically, not just read the fix — against a
+    real, credential-enforcing v0.27.0 server, the old header
+    genuinely 401s, the new one genuinely 200s. Found xoluman's own
+    test for this had the identical blind spot xolu's team found in
+    theirs: a mock recording what header was sent, which would have
+    passed against the broken behavior too. Fixed (renamed from
+    `..._SendsBearerToken` to `..._SendsAPIKeyHeader`, corrected
+    expectation).
+  - **#5 (`Health()` doesn't verify a credential): delivered, new
+    method.** `Health()` is correctly, deliberately unauthenticated by
+    design (matches `/ready`/`/version`/`/metrics`) — the fix was
+    calling the right method, not changing that one. Both connection-
+    test handlers switched to the new `Client.TestConnection()`. New
+    test proves the actual point: a server that's reachable but
+    rejects the credential now correctly reports failure, which
+    `Health()` structurally could never detect (mock server built to
+    genuinely distinguish this — `/health` unconditionally succeeds,
+    matching real xolu, while `/api/v1/schemas` actually checks the
+    credential).
+  - `docs/xolu-requests.md` updated throughout to reflect all of the
+    above accurately — every one of the 9 original items now struck
+    through as delivered.
+- **xolu v0.27.1 synced — reviewed directly, confirmed a no-op for
+  xoluman.** The only change in that release is client-side validation
+  added to `CreateMachineDef`/`ReplaceMachineDef` (Seam AMS's own
+  request, T-162) — confirmed via a full recursive diff of
+  `pkg/client` that nothing else changed, and confirmed xoluman calls
+  neither method (T-14, the FSM def module, isn't built yet). Clean
+  version bump, full test suite green, real e2e sanity check against
+  a running v0.27.1 instance.
+
+## [0.6.22] — 2026-08-04
+
+- **T-25 closed: DXP transaction support built** (see
+  `docs/RESOLVED.md` for what T-25 originally covered). A new,
+  standalone view — `/connections/{name}/dxp`, reached via the sidebar
+  — rather than a fourth query-editor mode, per the proposal's own
+  reasoning (`docs/proposals/dxp-transactions.md`): a DXP transaction
+  has no query language, only a chosen definition and the parameter
+  values ("bindings") its participants reference.
+  - **Def picker**: lists every registered definition
+    (`DxpDefList`), alphabetically.
+  - **Binding extraction, server-side** (`internal/ui/dxp.go`): walks
+    a selected def's full participant set (`DxpDefGet`), collecting
+    every distinct name referenced via `{"$ref": "..."}` — including
+    nested inside an array or another object, not just a top-level
+    param value. One implementation, not duplicated in JS. 7 new
+    tests covering top-level, nested-in-object, nested-in-array,
+    cross-participant deduplication, sort stability, and two
+    deliberate non-matches (a literal value with no `$ref`; a
+    multi-key object that happens to contain a `"$ref"` key but isn't
+    the documented single-key ref shape).
+  - **Dynamically-generated binding form** (`web/static/js/dxp-editor.js`):
+    one input per extracted binding name, accepting a bare number,
+    `true`/`false`, or a string — parsed as JSON with a plain-string
+    fallback, so typing intuitively produces the right type in the
+    `Bindings` map without needing to pre-know each binding's type.
+  - **Execution and result display**: `DxpTxnCreate`, with a
+    non-committed outcome (`released`/`expired`) rendered as a
+    distinct, informative state — confirmed directly against the
+    client's own doc comment that this is a normal response, not an
+    error, and implemented that way (`Run` always returns 200 with
+    the real status for genuine outcomes; only a transport/validation
+    failure before a transaction was even attempted uses the
+    upstream-error path). 6 new handler tests, including one
+    specifically asserting the released-is-not-an-HTTP-error behavior.
+  - Verified end-to-end against a real xolu instance with `XOLU_API_V2_ENABLED=true`:
+    registered a genuine DXP def, confirmed binding extraction against
+    the real (not synthetic) server response, ran a transaction with
+    real binding values, and confirmed the entity it created actually
+    exists in xolu afterward — the full flow, not just each piece in
+    isolation.
+  - "Saved DXP invocations" (a saved def+bindings pair) not built —
+    the proposal named this as its own deliberately separate concept
+    from the query-editor's saved-query feature; not part of this pass.
+
+## [0.6.21] — 2026-08-04
+
+- **Saved and recent queries, for all three query editor modes
+  (OQL, Sulpher, REST) separately.**
+  - **Saved**: explicit, named, server-backed — a new schema-less
+    `xoluman_saved_query` entity type, same established pattern as
+    `xoluman_field_meta` and `xoluman_blob_folder`: persisted in the
+    connected xolu instance itself, so a saved query is visible to
+    anyone else using xoluman against the same instance, not locked
+    to one local xoluman installation. New JSON API
+    (`internal/ui/query.go`): list (mode-filtered, newest first),
+    create, delete. 8 new Go tests.
+  - **Recent**: local, ephemeral, per browser — the last 15 queries
+    actually run per mode, kept in `localStorage`, scoped per
+    connection (keyed off the run URL, which already encodes the
+    connection name) so switching connections doesn't mix histories.
+    Recorded on every run regardless of outcome — a failed query is
+    one someone might want to pull back up and fix, not just a
+    successful one worth remembering.
+  - Both surfaced as two dropdowns above the editor in
+    `web/static/js/query-editor.js`, plus a "Save…" button that opens
+    an inline name field (not a native `prompt()` dialog) and a small
+    delete control for the currently-selected saved entry.
+  - Verified end-to-end against real xolu: mode-filtering genuinely
+    isolates OQL/Sulpher/REST saved queries from each other, the real
+    xolu entity is created with the correct fields per mode, and
+    deletion is real (confirmed gone from a subsequent list, not just
+    a 204 with no follow-through).
+- **`docs/proposals/dxp-transactions.md` — DXP transaction support
+  considered and written up, not built.** `DxpDef`/`DxpTxn` confirmed
+  directly against the real client — a def picker plus a dynamically-
+  generated binding-fill form, not a query language, so proposed as
+  its own view rather than a fourth query-editor mode. Filed as T-25,
+  explicitly deferred rather than silently dropped.
+
+## [0.6.20] — 2026-08-04
+
+- **Connections sidebar shipped — Phase 1 of the DBeaver-layout
+  proposal, in a scoped first form.** Direct response to a real
+  report: returning to the connections list to switch context, or to
+  reach Blobs/Query after already being in Entities, made no sense
+  once already working inside a connection. A persistent sidebar now
+  appears on every `/connections/{name}/...` page: current connection
+  name, Entities/Blobs/Query links with active-state highlighting
+  (correctly active on subpaths too — browsing into a blob folder
+  still highlights Blobs), and a "switch connection" list of every
+  other saved connection.
+  - Parsed entirely from the URL path already being rendered
+    (`connectionNameFromPath`) — no existing page handler needed a
+    signature change to thread a connection name through.
+  - The connection list for the switcher comes from a new
+    package-level `sidebarStore`, mirroring the exact pattern already
+    established for the module registry (`registry` in the same
+    file) — same trade-off, already accepted elsewhere in this
+    codebase, not a new kind of risk.
+  - Deliberately the simpler of two designs from the proposal: regular
+    server-rendered navigation, not `hx-boost` — the sidebar re-renders
+    on each page load like everything else today. The `hx-boost`
+    refinement (sidebar DOM persists across navigation) is still
+    available as a real follow-up; not pursued here since this already
+    delivers the actual value asked for, with less risk around the
+    existing htmx-based modal wiring.
+  - 5 new tests, including one with the shuffled test order and race
+    detector specifically to check the global `sidebarStore` for
+    cross-test leaks — none found.
+  - Verified end-to-end against a real running instance: correct
+    active-highlighting on Entities/Blobs/Query and on a Blobs
+    subpath, the switcher correctly excluding the current connection,
+    and correct handling of a connection name with a space (decoded
+    for display, properly re-escaped in hrefs).
+
+## [0.6.19] — 2026-08-04
+
+- **Table styling redesigned to match minty's own established
+  conventions** — reported directly as looking "too default, no signs
+  of styling attempts." xoluman depends on minty throughout but had
+  never adopted its own Tailwind theme's table convention
+  (`themes/tailwind/tailwind.go`'s `Table()`): a real elevated card
+  (shadow, subtle ring, rounded corners) rather than a bare table
+  sitting flush on the page background, a distinct header background
+  with uppercase tracked text instead of plain text, and striped rows.
+  `internal/ui/listing.go`'s `Table()` — used by every list page in the
+  app — now applies all three. Striping is a single Tailwind arbitrary-
+  variant selector on `<tbody>` (`[&>tr:nth-child(even)]:bg-gray-50`)
+  rather than requiring every caller to stripe its own rows, so every
+  existing call site picked it up automatically.
+- **The grid view's Tabulator mount got the same treatment** — it had
+  no wrapper styling at all (Tabulator's own vendored theme covers
+  rows/cells/headers, nothing at the outer-frame level), now wrapped
+  in a matching elevated card in both light and dark mode.
+- 1 new test, full suite green, Tailwind CSS rebuilt and the new
+  classes confirmed present in the compiled output before shipping.
+
+## [0.6.18] — 2026-08-04
+
+- **`docs/xolu-requests.md` rewritten as a single, living status
+  letter** consolidating all four requests filed to the xolu team
+  (the original 6-item batch, the FSM-def follow-up, and the two
+  newly-discovered bugs — T-23, T-24) into one place: delivered items
+  struck through with the version that shipped them, open items marked
+  🔴 ACTIVE, nothing left implicit. Two items previously believed still
+  open were re-checked directly against the current xolu source while
+  writing this, not carried forward as stale assumptions: item #2's
+  `EXPORT_API.md` doc bug is fixed (correctly reads `xolu.db`/
+  `database_file` throughout now), and item #6's `FieldDef.Type` doc
+  comment now explicitly states it's never set to `"ref"` — both
+  closed out. Genuinely still open, re-verified the same way: `Health()`
+  still applies no auth header (#5), the tenant-schema-prefix bug (#8,
+  T-23) and the undeclared-target REF update failure (#9, T-24).
+- Scanned `KNOWN_ISSUES.md` for anything found this session but never
+  formally written up as a request — found nothing outstanding; every
+  actionable xolu-side finding was already filed as its own document.
+- **Finished last session's interrupted migration to minty's own
+  `DarkMode` mechanism**, replacing the hand-rolled `theme.js` and
+  custom toggle button — `PageWithHead` now uses
+  `mi.DarkModeTailwind(mi.DarkModeSVGIcons())`, giving real SVG
+  moon/sun icons and minty's own tested init/persistence/icon-update
+  logic instead of a from-scratch reimplementation of the same thing.
+  `theme.js` deleted. Two tests fixed in the process: one had a false
+  positive (a blanket `"http://"` substring check flagged the SVG
+  icons' own `xmlns="http://www.w3.org/2000/svg"` namespace URI as an
+  external reference — narrowed to check actual `src=`/`href=`
+  attribute values instead), the other rewritten to check minty's
+  real generated markup rather than the removed custom implementation.
+
 ## [0.6.17] — 2026-08-04
 
 - **T-23: found and fixed the actual root cause of "clicking any

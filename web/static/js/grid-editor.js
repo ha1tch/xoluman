@@ -52,6 +52,7 @@ class XoluGridEditor extends LitElement {
     const columns = columnsEl ? JSON.parse(columnsEl.textContent) : [];
 
     this._gridEl = document.createElement('div');
+    this._gridEl.className = 'xolu-grid-mount';
     this.appendChild(this._gridEl);
 
     this._table = new window.Tabulator(this._gridEl, {
@@ -139,6 +140,25 @@ class XoluGridEditor extends LitElement {
         .dark .xolu-grid-results-ok { color: #4ade80; }
         .xolu-grid-results-error { color: #dc2626; }
         .dark .xolu-grid-results-error { color: #f87171; }
+        /* The mount point itself had no styling at all before this —
+           reported directly as looking "too default, no signs of
+           styling attempts," and correctly so; Tabulator's own vendored
+           theme provides row/cell/header styling but nothing at the
+           outer-frame level. Matches internal/ui/listing.go's Table()
+           redesign: a real elevated card (shadow, subtle ring, rounded
+           corners) rather than the table sitting bare on the page
+           background. Tabulator renders its own border internally too;
+           overflow:hidden here clips it to the rounded corners rather
+           than the two fighting each other at the edges. */
+        .xolu-grid-mount {
+          box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+          border-radius: 0.5rem;
+          overflow: hidden;
+          border: 1px solid rgba(0, 0, 0, 0.05);
+        }
+        .dark .xolu-grid-mount {
+          border-color: rgba(255, 255, 255, 0.1);
+        }
       </style>
       <div class="xolu-grid-toolbar">
         <div class="xolu-grid-status">

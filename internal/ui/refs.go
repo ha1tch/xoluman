@@ -51,6 +51,12 @@ func resolveFormOptions(ctx context.Context, c *xclient.Client, connName string,
 		Errors:       errs,
 		FieldOptions: map[string][]formengine.Option{},
 		RefLinks:     map[string]formengine.RefLink{},
+		RefTargets:   map[string]string{},
+	}
+	for _, ref := range schema.Refs {
+		if ref.Target != "" {
+			opts.RefTargets[ref.Name] = ref.Target
+		}
 	}
 
 	if metas, err := fieldmeta.LoadForEntityType(ctx, c, schema.Name); err == nil {
@@ -65,13 +71,33 @@ func resolveFormOptions(ctx context.Context, c *xclient.Client, connName string,
 			}
 			opts.FieldOptions[fieldName] = fieldOpts
 		}
+
+		// A ref field the schema itself doesn't declare a target for
+		// (RefTargets has no entry) may still have one remembered from
+		// a previous edit — see fieldmeta.RememberRefTarget's own doc
+		// comment for why this exists: xolu's embedded read-shape
+		// doesn't self-identify a ref value's target entity type, so
+		// without this every single edit of such a field required
+		// re-typing the entity type to save at all.
+		for _, ref := range schema.Refs {
+			if _, known := opts.RefTargets[ref.Name]; known {
+				continue
+			}
+			if target, ok := fieldmeta.LookupRememberedTarget(metas, ref.Name); ok {
+				opts.RefTargets[ref.Name] = target
+			}
+		}
 	}
 
-	for _, ref := range schema.Refs {
-		if ref.Target == "" {
-			continue // polymorphic target — no single entity type to link to
-		}
-		id, embeddedLabel, ok := refValueInfo(values.Get(ref.Name))
+	// Iterates opts.RefTargets, not schema.Refs directly — a real gap
+	// otherwise: schema.Refs only has ref.Target set when the schema
+	// itself declares one, but opts.RefTargets (built above) also
+	// includes remembered targets (fieldmeta.RememberRefTarget). A
+	// field with only a remembered target would never get a ref link
+	// or lightning-icon jump button at all if this kept checking
+	// schema.Refs' own Target field specifically.
+	for fieldName, target := range opts.RefTargets {
+		id, embeddedLabel, ok := refValueInfo(values.Get(fieldName))
 		if !ok {
 			continue // unset ref field — nothing to link to yet
 		}
@@ -83,10 +109,10 @@ func resolveFormOptions(ctx context.Context, c *xclient.Client, connName string,
 			// value is a bare ID: a freshly-typed, not-yet-saved form
 			// field, or a schema-less/inferred context with no
 			// embedded document to read a label from.
-			label = resolveRefLabel(ctx, c, ref.Target, id)
+			label = resolveRefLabel(ctx, c, target, id)
 		}
-		opts.RefLinks[ref.Name] = formengine.RefLink{
-			URL:   fmt.Sprintf("/connections/%s/entities/%s/%d/edit", connName, ref.Target, id),
+		opts.RefLinks[fieldName] = formengine.RefLink{
+			URL:   fmt.Sprintf("/connections/%s/entities/%s/%d/edit", connName, target, id),
 			Label: label,
 		}
 	}

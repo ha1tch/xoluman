@@ -45,7 +45,16 @@ func TestBuildClient_AuthModeNone_NoAuthorizationHeader(t *testing.T) {
 	}
 }
 
-func TestBuildClient_AuthModeAPIKey_SendsBearerToken(t *testing.T) {
+func TestBuildClient_AuthModeAPIKey_SendsAPIKeyHeader(t *testing.T) {
+	// "ApiKey ", not "Bearer " — xolu v0.27.0 (T-160) fixed a real bug
+	// where the client sent Bearer-prefixed apikey auth, which the
+	// server's own validateAPIKey never accepted; every AuthAPIKey
+	// connection was silently unauthenticated on every request until
+	// that fix. This test previously asserted the broken behavior
+	// (it would have passed either way, since it only records what
+	// header was sent rather than validating against a real,
+	// credential-enforcing server — the same class of blind spot the
+	// xolu team's own test suite had for this exact bug).
 	server, gotAuth, _ := captureAuth(t)
 	c := BuildClient(connstore.Connection{
 		ConnectionMeta: connstore.ConnectionMeta{BaseURL: server.URL, AuthMode: connstore.AuthAPIKey},
@@ -53,8 +62,8 @@ func TestBuildClient_AuthModeAPIKey_SendsBearerToken(t *testing.T) {
 	})
 	_, _ = c.List(context.Background(), "widgets", nil)
 
-	if *gotAuth != "Bearer my-api-key" {
-		t.Fatalf("Authorization header = %q, want %q", *gotAuth, "Bearer my-api-key")
+	if *gotAuth != "ApiKey my-api-key" {
+		t.Fatalf("Authorization header = %q, want %q", *gotAuth, "ApiKey my-api-key")
 	}
 }
 
@@ -108,46 +117,26 @@ func TestBuildClient_NoTenant_NoTenantPrefix(t *testing.T) {
 	}
 }
 
-func TestBuildSchemaClient_NeverAppliesTenantPrefix_EvenWhenTenantIsSet(t *testing.T) {
-	// The whole point of this function's existence: real bug, found
-	// via a real end-to-end report and reproduced exactly against a
-	// live server (examples/crm), not hypothetical. xolu's
-	// GetEntitySchema/DefineEntitySchema hit a genuinely global
-	// endpoint (`/schema/{entity}`, registered only once on the
-	// server, never duplicated under the tenant router) but
-	// Client.do() applies the tenant prefix to every request
-	// regardless once a tenant is configured — landing the entity
-	// type name in xolu's entity-by-id route's numeric {id} slot and
-	// failing with XOLU-ST004 ("Invalid ID"). BuildSchemaClient exists
-	// specifically to never carry a tenant at all, closing this off
-	// entirely rather than depending on call sites remembering not to
-	// use the regular client for a schema fetch.
+func TestBuildClient_GetEntitySchema_NoTenantPrefixEvenWithTenantSet(t *testing.T) {
+	// Confirms xolu v0.27.0's actual fix, not just the absence of
+	// xoluman's former workaround (BuildSchemaClient, removed once
+	// this was verified — see docs/RESOLVED.md's T-23 entry). The
+	// regular, tenant-configured client must now route a schema fetch
+	// correctly on its own: GetEntitySchema hits a genuinely global
+	// endpoint (`/schema/{entity}`), and xolu's client now knows that
+	// via buildURLRoot (confirmed directly against
+	// pkg/client/client.go's own doc comment on the fix) rather than
+	// applying the tenant prefix indiscriminately the way it used to.
 	server, _, gotPath := captureAuth(t)
-	c := BuildSchemaClient(connstore.Connection{
+	c := BuildClient(connstore.Connection{
 		ConnectionMeta: connstore.ConnectionMeta{BaseURL: server.URL, AuthMode: connstore.AuthNone, Tenant: "acme_crm"},
 	})
 	_, _ = c.GetEntitySchema(context.Background(), "companies")
 
 	if strings.Contains(*gotPath, "/tenant/") {
-		t.Fatalf("request path = %q, want no tenant prefix regardless of the connection's configured tenant", *gotPath)
+		t.Fatalf("request path = %q, want no tenant prefix for a schema fetch regardless of the connection's configured tenant", *gotPath)
 	}
 	if *gotPath != "/api/v1/schema/companies" {
 		t.Fatalf("request path = %q, want exactly %q", *gotPath, "/api/v1/schema/companies")
-	}
-}
-
-func TestBuildSchemaClient_StillAppliesAuth(t *testing.T) {
-	// The workaround is specifically and only about the tenant prefix
-	// — auth still needs to apply normally, or a schema fetch against
-	// an authenticated instance would fail for an unrelated reason.
-	server, gotAuth, _ := captureAuth(t)
-	c := BuildSchemaClient(connstore.Connection{
-		ConnectionMeta: connstore.ConnectionMeta{BaseURL: server.URL, AuthMode: connstore.AuthAPIKey, Tenant: "acme_crm"},
-		Token:          "secret-key",
-	})
-	_, _ = c.GetEntitySchema(context.Background(), "companies")
-
-	if *gotAuth != "Bearer secret-key" {
-		t.Fatalf("Authorization = %q, want %q", *gotAuth, "Bearer secret-key")
 	}
 }

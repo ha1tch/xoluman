@@ -53,7 +53,8 @@ var ownAuthoredJSFiles = []string{
 	"static/js/modal.js",
 	"static/js/grid-editor.js",
 	"static/js/query-editor.js",
-	"static/js/theme.js",
+	"static/js/dxp-editor.js",
+	"static/js/fsm-editor.js",
 }
 
 func TestOwnAuthoredJSFilesPresent(t *testing.T) {

@@ -69,6 +69,31 @@ harder styling coordination).
 
 ### Phase 1 — persistent sidebar tree (genuinely worth doing)
 
+**Implemented 2026-08-04**, in a scoped first form: a persistent
+sidebar on every `/connections/{name}/...` page (current connection
+name, Entities/Blobs/Query links with active-state highlighting, a
+"switch connection" list) — real, working navigation that survives
+being inside a connection's views, addressing the original report
+directly ("doesn't make sense to return to the connections listing...
+after you're already working").
+
+What shipped is *not* the `hx-boost` version described below — a
+simpler, lower-risk first cut using regular server-rendered navigation
+(the sidebar re-renders on each page load, same as everything else in
+the app today). The `hx-boost` optimization — keeping the sidebar's own
+DOM untouched across navigation, preserving scroll position and any
+expanded state — is still real, still available as a follow-up, and
+still carries the risk noted below (needs care around the existing
+htmx-based modal wiring); not pursued in this first pass since the
+simpler version already delivers the actual value asked for.
+
+Also not yet done: per-entity-type sub-links in the sidebar (would need
+an extra `ListEntities` call on every page load just to populate them —
+deferred, not free).
+
+Original proposal text, still accurate for the `hx-boost` refinement if
+it's worth doing later:
+
 - A left sidebar, always visible on every `/connections/{name}/...`
   page: the connection name at the top, then entity types (from
   `ListEntities`, reusing exactly what T-17 already built) and blob

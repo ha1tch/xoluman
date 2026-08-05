@@ -113,8 +113,27 @@ window.XModal = (function () {
   }
 
   function open(title) {
-    if (_backdrop) close();
-    _build();
+    if (!_backdrop) {
+      _build();
+    }
+    // When a modal is already open (the lightning-icon jump case —
+    // opening a linked entity from within an already-open modal),
+    // #modal-body's content is deliberately left untouched here. A
+    // real bug, found only by actually clicking it (Playwright), and
+    // found TWICE: the first fix (rebuilding the whole modal) removed
+    // the clicked button from the DOM before htmx's own click handler
+    // on that same element could fire its request. The second attempt
+    // (leaving the modal alone but resetting #modal-body's own
+    // textContent to a loading message) made the identical mistake
+    // one level down — the lightning button lives INSIDE #modal-body,
+    // so clearing its content also removes the button mid-click,
+    // synchronously, within this same onclick handler. The fix is to
+    // not touch #modal-body's content here at all: the old content
+    // stays visible until htmx's own swap replaces it once the
+    // response actually arrives, which is a perfectly fine transition
+    // and doesn't require touching the DOM synchronously inside a
+    // handler that fired because of a click on an element inside the
+    // very subtree being modified.
     setTitle(title || '');
   }
 
@@ -129,6 +148,33 @@ window.XModal = (function () {
     var el = document.getElementById('modal-title');
     if (el) el.textContent = t;
   }
+
+  // Promote the fragment's own <h1> (e.g. "Edit companies #1") to the
+  // modal's title bar, replacing whatever static, less specific title
+  // the trigger button set at click time (e.g. "Edit companies" — set
+  // before the specific row's id was even known). Reported directly
+  // as two redundant titles stacked on top of each other; this closes
+  // it centrally, once, for every modal-loaded form, rather than
+  // requiring each Go handler to coordinate its own title text with
+  // its own trigger button's title param.
+  // Listens on document, not document.body — a real bug caught only by
+  // actually running this in a browser (Playwright), not from reading
+  // the code: modal.js loads via a synchronous <script src> in <head>,
+  // executing before <body> has been parsed at all, so
+  // document.body.addEventListener would throw "Cannot read
+  // properties of null" immediately — an uncaught exception inside
+  // this IIFE that silently prevented the whole `return {...}`
+  // statement from ever running, meaning window.XModal was never
+  // defined and every single modal (New/Edit/Delete) broke. document
+  // itself always exists regardless of parse order, and htmx's own
+  // events bubble up to it the same as they would to body.
+  document.addEventListener('htmx:afterSwap', function (e) {
+    if (!e.detail || !e.detail.target || e.detail.target.id !== 'modal-body') return;
+    var h1 = e.detail.target.querySelector('h1');
+    if (!h1) return;
+    setTitle(h1.textContent);
+    h1.remove();
+  });
 
   return { open: open, close: close, setTitle: setTitle };
 }());

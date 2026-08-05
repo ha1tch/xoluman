@@ -16,6 +16,7 @@ import (
 	xclient "github.com/ha1tch/xolu/pkg/client"
 
 	"github.com/ha1tch/xoluman/internal/connstore"
+	"github.com/ha1tch/xoluman/internal/fieldmeta"
 	"github.com/ha1tch/xoluman/internal/formengine"
 	"github.com/ha1tch/xoluman/internal/importer"
 	"github.com/ha1tch/xoluman/internal/modules"
@@ -79,18 +80,6 @@ func (h *EntitiesHandler) clientFor(ctx context.Context, name string) (*xclient.
 		return nil, err
 	}
 	return xoluext.BuildClient(conn), nil
-}
-
-// schemaClientFor returns a tenant-less client for GetEntitySchema/
-// DefineEntitySchema calls specifically — see xoluext.BuildSchemaClient's
-// own doc comment for exactly why these two calls need a different
-// client than every other entity operation on the same connection.
-func (h *EntitiesHandler) schemaClientFor(ctx context.Context, name string) (*xclient.Client, error) {
-	conn, err := h.store.Get(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	return xoluext.BuildSchemaClient(conn), nil
 }
 
 // writeConnectionNotFound renders a plain 404 when {name} doesn't match
@@ -232,12 +221,7 @@ func (h *EntitiesHandler) Show(w http.ResponseWriter, r *http.Request) {
 	// not fail this page — c.List below doesn't need a schema at all,
 	// only the preview-column choice does, and that has a fallback.
 	var previewCols []xclient.FieldDef
-	schemaClient, err := h.schemaClientFor(r.Context(), name)
-	if err != nil {
-		writeUpstreamError(w, name, r.URL.Path, err)
-		return
-	}
-	schema, err := schemaClient.GetEntitySchema(r.Context(), entityType)
+	schema, err := c.GetEntitySchema(r.Context(), entityType)
 	switch {
 	case err == nil:
 		previewCols = previewFields(schema.Fields)
@@ -268,7 +252,7 @@ func (h *EntitiesHandler) Show(w http.ResponseWriter, r *http.Request) {
 
 	basePath := entitiesBasePath(name, entityType)
 	cfg := ListPageConfig{Title: entityType, CreateLabel: "New " + entityType, CreateURL: basePath + "/new"}
-	refTargets := refTargetsByField(schema) // nil when schema is nil (inferred fields) — inference has no way to know which fields are references
+	refTargets := refTargetsForSubmission(r.Context(), c, schema) // nil-schema case (inferred fields) still returns nil — inference has no way to know which fields are references
 	body := func(b *mi.Builder) mi.Node {
 		importLink := b.A(mi.Href(basePath+"/import"), mi.Class(btnSecondary+" mb-3 inline-flex"), "Import from file")
 		gridLink := b.A(mi.Href(basePath+"/grid"), mi.Class(btnSecondary+" mb-3 inline-flex"), "Grid view")
@@ -380,6 +364,65 @@ func refTargetsByField(schema *xclient.EntitySchema) map[string]string {
 	return targets
 }
 
+// refTargetsForSubmission is refTargetsByField plus any remembered
+// targets (fieldmeta.RememberRefTarget) — required specifically at
+// ParseFormValues call sites, not just the rendering path. The reason
+// this can't just be refTargetsByField: once a target is remembered,
+// resolveFormOptions's own RefTargets knows about it and refInput
+// correctly stops rendering the companion f.Name+"__ref_entity" input
+// for that field (it's not needed anymore) — but if ParseFormValues is
+// then called with only the schema-derived map, it has no way to know
+// the target either, the companion field genuinely isn't in the
+// submitted form, and it falls back to a bare number that xolu
+// rejects. This mirrors resolveFormOptions's own remembered-target
+// lookup so the two stay in agreement about what's "known."
+func refTargetsForSubmission(ctx context.Context, c *xclient.Client, schema *xclient.EntitySchema) map[string]string {
+	targets := refTargetsByField(schema)
+	if schema == nil {
+		return targets
+	}
+	if targets == nil {
+		targets = map[string]string{}
+	}
+	metas, err := fieldmeta.LoadForEntityType(ctx, c, schema.Name)
+	if err != nil {
+		return targets // best-effort — a lookup failure just means no remembered targets apply this time, not a hard failure
+	}
+	for _, ref := range schema.Refs {
+		if _, known := targets[ref.Name]; known {
+			continue
+		}
+		if target, ok := fieldmeta.LookupRememberedTarget(metas, ref.Name); ok {
+			targets[ref.Name] = target
+		}
+	}
+	return targets
+}
+
+// rememberNewRefTargets saves any ref field's companion
+// f.Name+"__ref_entity" value that differs from what's already known
+// (already contains the schema-declared and previously-remembered
+// targets — see refTargetsForSubmission) — called only after a
+// successful create/update, so a target that turned out to be wrong
+// (the save itself failed) is never remembered. Best-effort: a save
+// failure here doesn't affect the entity save that already succeeded,
+// just means this specific field won't auto-fill next time.
+func rememberNewRefTargets(ctx context.Context, c *xclient.Client, entityType string, schema *xclient.EntitySchema, form url.Values, alreadyKnown map[string]string) {
+	if schema == nil {
+		return
+	}
+	for _, ref := range schema.Refs {
+		if ref.Target != "" {
+			continue // schema already declares it — nothing to remember
+		}
+		supplied := form.Get(ref.Name + "__ref_entity")
+		if supplied == "" || supplied == alreadyKnown[ref.Name] {
+			continue
+		}
+		_ = fieldmeta.RememberRefTarget(ctx, c, entityType, ref.Name, supplied)
+	}
+}
+
 func entityListTable(connName, entityType string, preview []xclient.FieldDef, refTargets map[string]string, result *xclient.ListResult) mi.H {
 	return func(b *mi.Builder) mi.Node {
 		if len(result.Entities) == 0 {
@@ -413,14 +456,17 @@ func entityListTable(connName, entityType string, preview []xclient.FieldDef, re
 						if linkText == "" {
 							linkText = strconv.FormatInt(id, 10)
 						}
-						cells = append(cells, b.Td(mi.Class(td), b.A(mi.Href(refURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), linkText)))
+						cells = append(cells, b.Td(mi.Class(td),
+							b.A(mi.Href(refURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), linkText),
+							RefJumpButton(refURL)(b),
+						))
 						continue
 					}
 				}
 				cells = append(cells, b.Td(mi.Class(td), previewValue(value)))
 			}
 			cells = append(cells,
-				b.Td(mi.Class(td), b.A(mi.Href(editURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), "Edit")),
+				b.Td(mi.Class(td), ModalTriggerButton("Edit", "Edit "+entityType, editURL, "text-indigo-600 dark:text-indigo-400 hover:underline bg-transparent border-0 p-0 cursor-pointer text-sm")(b)),
 				b.Td(mi.Class(td), ModalTriggerButton("Delete", "Delete "+entityType, deleteConfirmURL, btnDanger)(b)),
 			)
 			rows[i] = b.Tr(cells...)
@@ -502,8 +548,8 @@ func paginationBar(basePath string, page, totalPages int) mi.H {
 // no schema AND no existing data to infer from either. The caller
 // should show a clear message then, not attempt to render a
 // meaningless empty form.
-func (h *EntitiesHandler) resolveEntityFields(ctx context.Context, c, schemaClient *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
-	schema, schemaErr := schemaClient.GetEntitySchema(ctx, entityType)
+func (h *EntitiesHandler) resolveEntityFields(ctx context.Context, c *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
+	schema, schemaErr := c.GetEntitySchema(ctx, entityType)
 	switch {
 	case schemaErr == nil:
 		return schema.Fields, schema, true, nil
@@ -554,25 +600,20 @@ func (h *EntitiesHandler) NewForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schemaClient, err := h.schemaClientFor(r.Context(), name)
-	if err != nil {
-		writeUpstreamError(w, name, r.URL.Path, err)
-		return
-	}
-	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, schemaClient, entityType, nil)
+	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
 	if !ok {
-		WriteHTML(w, Page("New "+entityType, r.URL.Path, noFieldsToInferBody(entityType)))
+		WriteModalAware(w, r, "New "+entityType, noFieldsToInferBody(entityType))
 		return
 	}
 
 	basePath := entitiesBasePath(name, entityType)
 	opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, nil, nil)
 	body := entityFormBody("New "+entityType, basePath, fields, opts, "")
-	WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
+	WriteModalAware(w, r, "New "+entityType, body)
 }
 
 // Create parses and validates the submitted form, saves on success, and
@@ -592,18 +633,13 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schemaClient, err := h.schemaClientFor(r.Context(), name)
-	if err != nil {
-		writeUpstreamError(w, name, r.URL.Path, err)
-		return
-	}
-	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, schemaClient, entityType, nil)
+	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
 	}
 	if !ok {
-		WriteHTML(w, Page("New "+entityType, r.URL.Path, noFieldsToInferBody(entityType)))
+		WriteModalAware(w, r, "New "+entityType, noFieldsToInferBody(entityType))
 		return
 	}
 
@@ -612,14 +648,15 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargetsByField(schema))
+	refTargets := refTargetsForSubmission(r.Context(), c, schema)
+	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargets)
 	basePath := entitiesBasePath(name, entityType)
 
 	if len(errs) > 0 {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, errs)
 		body := entityFormBody("New "+entityType, basePath, fields, opts, "")
-		WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
+		WriteModalAware(w, r, "New "+entityType, body)
 		return
 	}
 
@@ -627,9 +664,10 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, nil)
 		body := entityFormBody("New "+entityType, basePath, fields, opts, err.Error())
-		WriteHTML(w, Page("New "+entityType, r.URL.Path, body))
+		WriteModalAware(w, r, "New "+entityType, body)
 		return
 	}
+	rememberNewRefTargets(r.Context(), c, entityType, schema, r.PostForm, refTargets)
 
 	http.Redirect(w, r, basePath, http.StatusSeeOther)
 }
@@ -655,12 +693,7 @@ func (h *EntitiesHandler) EditForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schemaClient, err := h.schemaClientFor(r.Context(), name)
-	if err != nil {
-		writeUpstreamError(w, name, r.URL.Path, err)
-		return
-	}
-	schema, err := schemaClient.GetEntitySchema(r.Context(), entityType)
+	schema, err := c.GetEntitySchema(r.Context(), entityType)
 	if err != nil && !isNotFoundError(err) {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
@@ -682,7 +715,7 @@ func (h *EntitiesHandler) EditForm(w http.ResponseWriter, r *http.Request) {
 	idStr := strconv.FormatInt(id, 10)
 	opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, formengine.Values(entity.Data), nil)
 	body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, "")
-	WriteHTML(w, Page("Edit "+entityType, r.URL.Path, body))
+	WriteModalAware(w, r, "Edit "+entityType, body)
 }
 
 func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -704,12 +737,7 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schemaClient, err := h.schemaClientFor(r.Context(), name)
-	if err != nil {
-		writeUpstreamError(w, name, r.URL.Path, err)
-		return
-	}
-	schema, schemaErr := schemaClient.GetEntitySchema(r.Context(), entityType)
+	schema, schemaErr := c.GetEntitySchema(r.Context(), entityType)
 	if schemaErr != nil && !isNotFoundError(schemaErr) {
 		writeUpstreamError(w, name, r.URL.Path, schemaErr)
 		return
@@ -737,7 +765,8 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargetsByField(schema))
+	refTargets := refTargetsForSubmission(r.Context(), c, schema)
+	values, errs := formengine.ParseFormValues(fields, r.PostForm, refTargets)
 	basePath := entitiesBasePath(name, entityType)
 	idStr := strconv.FormatInt(id, 10)
 
@@ -745,7 +774,7 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, errs)
 		body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, "")
-		WriteHTML(w, Page("Edit "+entityType, r.URL.Path, body))
+		WriteModalAware(w, r, "Edit "+entityType, body)
 		return
 	}
 
@@ -753,9 +782,10 @@ func (h *EntitiesHandler) Update(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		opts := resolveFormOptionsMaybeSchema(r.Context(), c, name, entityType, schema, values, nil)
 		body := entityFormBody("Edit "+entityType+" #"+idStr, basePath+"/"+idStr, fields, opts, err.Error())
-		WriteHTML(w, Page("Edit "+entityType, r.URL.Path, body))
+		WriteModalAware(w, r, "Edit "+entityType, body)
 		return
 	}
+	rememberNewRefTargets(r.Context(), c, entityType, schema, r.PostForm, refTargets)
 
 	http.Redirect(w, r, basePath, http.StatusSeeOther)
 }

@@ -217,3 +217,48 @@ func TestDecodeMeta_DefaultRefOptionsField(t *testing.T) {
 		t.Fatalf("RefOptionsField = %q, want default %q", got["x"].RefOptionsField, "options")
 	}
 }
+
+func TestRememberRefTarget_CreatesFieldMetaDoc(t *testing.T) {
+	var got map[string]any
+	c := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "message": "created"})
+	})
+
+	if err := RememberRefTarget(context.Background(), c, "companies", "owner", "users"); err != nil {
+		t.Fatalf("RememberRefTarget: %v", err)
+	}
+	if got["entity_type"] != "companies" || got["field_name"] != "owner" || got["option_kind"] != "ref-target" || got["ref_entity"] != "users" {
+		t.Fatalf("created doc = %+v, unexpected", got)
+	}
+}
+
+func TestLookupRememberedTarget_FindsRefTargetKind(t *testing.T) {
+	metas := map[string]Meta{
+		"owner": {OptionKind: "ref-target", RefEntity: "users"},
+	}
+	target, ok := LookupRememberedTarget(metas, "owner")
+	if !ok || target != "users" {
+		t.Fatalf("got %q, %v, want %q, true", target, ok, "users")
+	}
+}
+
+func TestLookupRememberedTarget_IgnoresOtherOptionKinds(t *testing.T) {
+	// A "ref"-kind Meta's RefEntity means something different (where a
+	// select field's options come from) — must not be misread as a
+	// remembered ref-field target.
+	metas := map[string]Meta{
+		"status": {OptionKind: "ref", RefEntity: "status_options", RefID: 1},
+	}
+	_, ok := LookupRememberedTarget(metas, "status")
+	if ok {
+		t.Fatal("got ok=true for a \"ref\"-kind Meta, want false — that's a different concept")
+	}
+}
+
+func TestLookupRememberedTarget_MissingField(t *testing.T) {
+	_, ok := LookupRememberedTarget(map[string]Meta{}, "owner")
+	if ok {
+		t.Fatal("got ok=true for a field with no meta at all, want false")
+	}
+}

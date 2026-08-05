@@ -1,8 +1,20 @@
 # Requests from xoluman to the xolu team
 
 Author: Horacio, via Claude (xoluman development session)
-Date: 2026-08-03
-Status: draft — for the xolu team's review, not a commitment to anything
+First filed: 2026-08-03
+Last updated: 2026-08-04
+Status: **living document** — this is the one place that tracks every
+open and closed request, kept current as things ship or new gaps turn
+up, rather than a point-in-time draft. Individual detailed documents
+(`docs/xolu-requests-fsm-def.md`, `docs/xolu-requests-tenant-schema.md`,
+`docs/xolu-requests-undeclared-ref-update.md`) still hold full
+reproduction steps for the items that need them — this letter is the
+index and current status, updated to fold all of them in.
+
+Delivered items are struck through with the version that shipped them.
+Still-open items are marked **🔴 ACTIVE**. Nothing here has been
+implemented against your working copy — xoluman's own tracking
+(`docs/TRACKING.md`) is where the corresponding item lives on our side.
 
 ---
 
@@ -12,209 +24,209 @@ xoluman is a web-based operator UI for xolu — connection management,
 data browsing/editing, query running, and blob access, against one or
 more xolu instances. It depends entirely on `xolu/pkg/client`.
 
-This document lists everything xoluman currently needs from xolu that
-xolu doesn't yet provide, or provides with a gap. It's a request, not a
-patch — none of this has been implemented against your working copy.
-Each item says what's needed, which xoluman feature it blocks, and why
-it can't reasonably be built xoluman-side instead.
-
-This was written after a deliberate review of the whole project's
-requirements, not just whatever came up first — the last section lists
-things that were considered and are *not* being requested, so the scope
-here is what's actually load-bearing, not a wishlist.
+This document lists everything xoluman has needed from xolu that xolu
+didn't yet provide, or provided with a gap — plus, as of this update,
+two real bugs found while actually using the client against realistic
+data (`examples/crm`), not just gaps in coverage.
 
 ---
 
-## 1. Blob primitive client methods
+## ~~1. Blob primitive client methods~~ — ✅ delivered in v0.25.0
 
-**Blocks:** xoluman's blob browser (a directly-requested feature from
-the original spec: "provide easy access to the `/blob` primitive"), and
-its virtual-hierarchy design on top of it.
+`BlobPut`/`BlobGet`/`BlobHead`/`BlobDelete`/`BlobList`/`BlobUsage`,
+confirmed directly against the real v0.25.0 source before being
+trusted. Client-side key validation (rejecting `/` and `\`, plus
+reserved `.`/`..` and a leading `.`) came as a bonus beyond what was
+asked. Powers xoluman's blob browser (T-09), shipped.
 
-`docs/BLOB_API.md` documents a full REST surface —
-`POST/GET/HEAD/DELETE /api/v1/blob{,/key}`, `GET /api/v1/blob` (list),
-`GET /api/v1/blob/usage` — none of which `pkg/client` currently wraps.
-Everything else in xoluman builds on typed client methods
-(`Create`/`Get`/`Update`/`List`/…); the blob primitive is the one gap.
+## ~~2. A streaming Export method~~ — ✅ delivered in v0.25.0, redesigned
 
-Requesting: `BlobPut`, `BlobGet`, `BlobHead`, `BlobDelete`, `BlobList`,
-`BlobUsage`, tenant-scoped like the rest of the client, mirroring the
-existing method style.
+Not the synchronous stream originally asked for — redesigned to async,
+tenant-scoped, and blob-backed, for a real reason stated plainly at the
+time: the old `GET /api/v1/export` had no tenant scoping at all, a
+much bigger blast radius than anything else in the API. `Client.Export`
+hides the polling; the caller-facing experience matches what was
+originally asked for. The `EXPORT_API.md` doc bug found in the original
+ask (`entities.db`/`entities_file` vs. the real `xolu.db`/
+`database_file`) — checked against the current source while updating
+this letter, not left as a stale assumption: it's fixed, the doc now
+correctly says `xolu.db`/`database_file` throughout.
 
-One implementation note worth passing along: blob transfer doesn't fit
-the existing `do`/`doURL`/`doOnce` helpers — they hardcode
-`Content-Type: application/json`, which is wrong for arbitrary blob
-content, and have no header-injection point for `X-Blob-Key`. Whoever
-picks this up will likely want a separate low-level path for these
-methods rather than forcing them through the JSON-CRUD helpers.
+## ~~3. A minimal raw request method~~ — ✅ delivered in v0.25.0
 
----
+`Client.Raw` — no tenant-prefixing (caller controls the exact path),
+no structured-error decoding (caller inspects `StatusCode` directly),
+matching what was asked for closely. Powers xoluman's query editor's
+REST mode (T-12), shipped and verified end-to-end, including a real
+400 from an invalid path coming back as data rather than an error —
+exactly the point of an escape hatch.
 
-## 2. A streaming Export method
+## ~~4. A client wrapper for schema registration~~ — ✅ delivered in v0.25.0
 
-**Blocks:** xoluman's backup feature (also directly requested in the
-original spec).
+`Client.DefineEntitySchema`. Not yet consumed by xoluman directly (the
+blob-folder design ended up not needing it — `xoluman_blob_folder` is
+created schema-less, matching the same pattern as `xoluman_field_meta`)
+but available.
 
-`GET /api/v1/export` streams a zip (manifest + database file + optional
-`graph.json`), and `EXPORT_API.md` is explicit that it streams without
-writing a server-side temp file — meaning nothing bounds the response
-size in advance. A client method needs to write to an `io.Writer`, not
-buffer into `[]byte`, or a large database turns into a large in-memory
-allocation on every caller.
+**Bonus, not requested:** `ListEntities` and the whole schema-promotion
+surface (`GetSchemaSuggestion`/`PromoteFlex`/`PromoteStrict`) — both
+shipped in v0.25.0 and both now load-bearing in xoluman (T-17's real
+fix for schema-less entity discovery, T-20's promotion UI).
 
-**A documentation bug found in the course of reviewing this:**
-`EXPORT_API.md` says the database file inside the zip is named
-`entities.db`, with manifest key `entities_file`, plus a `graph_files`
-array key. The actual handler
-(`pkg/server/handlers.go:handleExport`) writes the file as `xolu.db`
-and sets the manifest key `database_file` — confirmed by reading the
-handler directly, not just the doc. There's no `graph_files` key at
-all; only `graph_json` when the graph subsystem is enabled. Worth
-fixing the doc regardless of when/whether the client method lands,
-since anyone hand-parsing the manifest against the current doc will
-get it wrong.
+## ~~5. `Client.Health()` doesn't apply the configured auth header~~ — ✅ delivered in v0.27.0, new method
 
-Also worth knowing for whoever implements the client side: `/export`
-is not tenant-scoped — confirmed via `server.go`'s route registration,
-it's registered only in the non-tenant-routes block and is disabled
-entirely under `XOLU_TENANT_MODE=strict`. The client's usual
-`buildURL` tenant-prefixing must not apply here, or a client configured
-with a tenant would construct a URL that doesn't exist server-side.
+Not a case of "just add an auth header" — `/health` is deliberately
+exempt from auth server-side (same convention as `/ready`/`/version`/
+`/metrics`), so that would have been a no-op. `Client.TestConnection()`
+hits `GET /api/v1/schemas` instead — genuinely authenticated, cheap,
+works before a tenant is even chosen. Both of xoluman's "Test
+connection" handlers switched to it; verified with a new test proving
+the actual point (a server that accepts the request but rejects the
+credential now correctly reports failure, which `Health()` structurally
+could never detect).
 
----
+**Testing this turned up something bigger, thank you for catching it:**
+`apikey` auth mode sent `Authorization: Bearer <key>` since the option
+existed; the server's own validator only ever accepted `X-API-Key` or
+`Authorization: ApiKey <key>`. Every `apikey`-configured client was
+silently unauthenticated on every request. Confirmed empirically on our
+side too, not just read the fix — against a real, credential-enforcing
+v0.27.0 server, the old header genuinely 401s and the new one genuinely
+200s. Also found: xoluman's own test for this had the identical blind
+spot yours did — a mock recording what header was sent, which would
+have passed against the broken behavior just as easily. Fixed on both
+sides now.
 
-## 3. A minimal raw request method
+One more small thing while in the area: `authHeader()`'s own doc
+comment (`pkg/client/client.go`, the `AuthAPIKey`/`WithAPIKey` doc
+comments around lines 71–72 and 133) still says `"Authorization: Bearer
+<key>"` for apikey mode — the code's fixed, the comment above it wasn't
+updated to match. Not urgent, same five-minute-confirm category as #6
+below.
 
-**Blocks:** xoluman's ad hoc REST query console (one of three query
-modes alongside OQL and Sulpher, both already fully covered by
-existing `Client.OQL`/`Client.Sulpher`).
+## ~~6. `FieldDef.Type`'s doc comment lists `"ref"`, code never sets it that way~~ — ✅ fixed
 
-`Client.do`/`doURL`/`doOnce` are all unexported. An operator tool that
-wants to let someone issue an arbitrary method+path+body request
-against a connected instance — using whatever auth is already
-configured, without re-implementing auth/retry logic client-side — has
-no way to do that today. Requesting something like:
-
-```go
-Raw(ctx context.Context, method, path string, body io.Reader) (status int, respBody []byte, err error)
-```
-
-or whatever shape fits best. The point isn't the exact signature, just
-that the existing auth/retry logic lives in one place rather than being
-reimplemented by every consumer that wants raw access.
-
----
-
-## 4. A client wrapper for schema registration
-
-**Blocks:** part of xoluman's blob-hierarchy design (T-09) — not
-blob access itself (covered by #1), but the "virtual folders" layer on
-top of it.
-
-`docs/JSON_SCHEMA.md` documents `POST /api/v1/schema/{entity}` as a
-real, working endpoint — confirmed by reading the doc directly, and
-confirmed that `pkg/client` has no method wrapping it (`GetEntitySchema`
-exists for reading; nothing exists for writing). xoluman's blob-folder
-design needs to register a schema for a small bookkeeping entity type
-(`xoluman_blob_folder`) it creates inside whichever xolu instance is
-being browsed, so that entity type gets proper validation and shows up
-correctly through xoluman's own generic schema-driven editor, the same
-as any other entity type.
-
-Worth being upfront: schema registration has real side effects per your
-own docs — it creates an adapted table and starts enforcing validation
-immediately. Whatever shape this method takes is the xolu team's call,
-not something to design from outside. Flagging the need, not proposing
-an API.
+Checked against current source while updating this letter, same as #2
+above: `FieldDef.Type`'s doc comment now reads "Always set directly
+from the schema's own `\"type\"` key — never `\"ref\"` or any other
+xolu-specific tag; those live in `Format` instead" — exactly the
+five-minute confirm that was asked for. Never blocked anything on
+xoluman's side either way.
 
 ---
 
-## 5. `Client.Health()` doesn't apply the configured auth header
+## ~~7. FSM definition write methods~~ — ✅ delivered in v0.26.0
 
-**This isn't a missing method — it's a behavioural gap in something
-that already exists**, and it affects xoluman functionality that has
-already shipped.
+(Full original ask: `docs/xolu-requests-fsm-def.md` — follow-up letter,
+filed 2026-08-03, separately from the batch above.)
 
-Confirmed by reading `Health()` directly: it builds its own request and
-never calls `authHeader()`. xoluman's connection-management page has a
-"Test connection" button built on `Health()` — right now, that button
-can only tell someone whether the *server* is reachable, not whether
-the *token* they configured is actually valid. A connection with a
-wrong or expired API key currently looks identical, from `Health()`'s
-perspective, to one that's perfectly configured.
+`CreateMachineDef`/`ReplaceMachineDef`/`DeleteMachineDef`/
+`ValidateMachineDef` — confirmed directly against v0.26.0 source,
+matching the request closely. Bonus beyond what was asked: `analysis`
+comes back as a typed `MachineDefAnalysis` struct (reachability,
+determinism, cycles, warnings) on all four, and `GetMachineDef` gained
+a `ParsedAnalysis()` method decoding into the same struct.
 
-This is a real problem for a tool whose whole purpose is managing
-connections and their credentials — the one thing "test this
-connection" most needs to check is exactly the thing it currently
-can't. Two ways this could go, and no preference expressed here since
-it's genuinely the xolu team's design call:
+Two behavioral notes from the delivery, worth keeping for whoever
+builds xoluman's FSM editor (T-14, on its own track, not currently
+active): `ReplaceMachineDef` affects future machine creation only, no
+retroactive effect on already-running machines; `DeleteMachineDef` has
+no reference check at all (no "count machines by definition ID"
+exposed — client-side cross-referencing needed for a "warn before
+deleting something in use" affordance, if wanted).
 
-- Make `Health()` (or a variant) apply the configured auth header, so
-  an invalid credential surfaces as a distinct failure from server
-  unreachability, or
-- Point us at whichever existing authenticated, cheap endpoint is the
-  right thing for a client to hit purely to validate "is this server
-  reachable *and* is this credential accepted" — `V2Availability` was
-  considered as a candidate but its auth behaviour and cost weren't
-  verified, so it's mentioned as a question, not a recommendation.
+`internal/xoluext/fsmdef.go` — the hand-rolled raw-HTTP workaround
+built before this shipped — has been deleted. Zero callers anywhere in
+xoluman at the time it was removed.
 
 ---
 
-## 6. A smaller inconsistency, worth a quick look
+## ~~8. Tenant-scoped clients wrongly prefix genuinely global endpoints~~ — ✅ already fixed, shipped before this letter arrived
 
-`client.FieldDef.Type`'s doc comment lists `"ref"` as a possible `Type`
-value, but the actual schema-extraction code
-(`extractFieldsFromSchema`) only ever sets it via `Format == "ref"`,
-never via `Type`. xoluman's form renderer defensively handles both
-cases, so this isn't blocking anything — just flagging that either the
-comment is stale, or there's a code path setting `Type == "ref"` that
-wasn't found during review. Worth a five-minute confirm either way.
+(Full original detail, exact reproduction: `docs/xolu-requests-
+tenant-schema.md`, filed 2026-08-04.)
+
+Shipped in v0.26.2 — `buildURLRoot`, confirmed directly against
+`pkg/client/client.go`'s own doc comment on the fix, which credits this
+exact report. `GetEntitySchema`/`DefineEntitySchema`/the schema-list
+call all correctly skip the tenant prefix on their own now.
+`internal/xoluext.BuildSchemaClient()`, xoluman's own workaround, has
+been removed — all 6 call sites reverted to the regular client, and a
+new test confirms the regular client now correctly handles a schema
+fetch even with a tenant configured, not just the absence of the old
+workaround.
+
+---
+
+## ~~9. Updating an entity with an existing, undeclared-target REF field always fails~~ — ✅ delivered in v0.27.0, real cause different from our theory
+
+(Original detail, exact reproduction, isolated variable by variable:
+`docs/xolu-requests-undeclared-ref-update.md`, filed 2026-08-04 — kept
+for the record; superseded by what's below.)
+
+Our own working theory (undeclared ref target) reproduced the symptom
+exactly but was wrong about the cause — thank you for checking it
+directly rather than trusting it: a plain schema with no ref fields at
+all reproduced the identical failure, and declaring a target did not
+fix it. The real cause: `PUT`, `PATCH`, and `save` all validated a
+document that already contained `id` (and for `PATCH`, `_version`) —
+system fields no schema ever declares — and
+`additionalProperties:false` correctly rejected them per its own spec,
+on every update regardless of what was actually changed. `POST`
+(create) never hit this, since a not-yet-created entity has no `id`
+yet. Fixed via `stripSystemFieldsForValidation`, confirmed directly
+against `pkg/server/handlers.go`/`server.go`'s three call sites, and
+verified independently on our side: a correctly-shaped direct `PUT`
+against the exact `examples/crm` repro now succeeds.
+
+**A separate, genuinely distinct bug turned up once that fix was
+verified — entirely ours, not yours, noting it here for completeness
+rather than as an ask.** With the id/_version issue fixed, updating
+`companies` *still* failed through xoluman's own web form — because
+the form was submitting a bare number for `owner` (the undeclared-
+target ref field), which your validator correctly rejects regardless
+of the id/_version fix. This affected both create and update
+identically and had nothing to do with your side. Closed on ours: the
+form now asks the person for the target entity type directly when the
+schema doesn't declare one, and builds the real `{type,entity,id}`
+shape from that. Verified end-to-end through xoluman's actual web
+form against the real CRM demo — both create and update now genuinely
+succeed, confirmed persisted in the real data.
 
 ---
 
 ## Reviewed and *not* requesting
 
 Listed so the scope above reads as reviewed, not assembled by grepping
-for the first gap found in each area:
+for the first gap found in each area — unchanged since the original
+filing, still accurate:
 
 - **Bulk/multi-entity import beyond `Commit`.** `POST /api/v1/commit`
-  already covers atomic multi-entity writes, which is enough for
-  reasonably-sized import batches. Not asking for a dedicated bulk
-  import endpoint at this time — xoluman's import feature (T-05) is
-  designed around `Create`/`Commit` as they exist. Might revisit if
-  that design work surfaces a real limit, but nothing concrete yet.
-- **OQL/Sulpher query execution.** Already fully covered by
-  `Client.OQL` and `Client.Sulpher`. Nothing needed.
-- **Entity CRUD, listing, pagination, search.** Already fully covered
-  by `Create`/`Get`/`Update`/`Patch`/`Delete`/`List`/`Search`. Nothing
-  needed.
-- **Echoing the document back after a write.** `Create`/`Update`/`Patch`
-  return `Data: nil` by design, requiring a follow-up `Get` to redisplay
-  a saved entity. A minor extra round-trip, not a blocker — not asking
-  for a change, just noting it was considered.
-- **Bulk grid-editing support** (hundreds of rows/cells at once,
-  xoluman's planned T-11). Not concretely designed yet, so nothing
-  concrete to ask for. May come back once that design exists, if it
-  turns out `Commit` isn't enough for that shape of write.
+  already covers atomic multi-entity writes. xoluman's import feature
+  (T-05, shipped) is built on `Create`/`Commit` as they exist.
+- **OQL/Sulpher query execution.** Fully covered by `Client.OQL` and
+  `Client.GraphQuery`. Nothing needed.
+- **Entity CRUD, listing, pagination, search.** Fully covered.
+- **Echoing the document back after a write.** Not asking for a
+  change, just noting it was considered.
+- **Bulk grid-editing support.** xoluman's grid editor (T-11) shipped
+  on the existing per-row `Patch` calls; `Commit` wasn't needed for
+  that shape of write after all.
 
 ---
 
-## Priority, from xoluman's side
+## Status: everything in this letter is closed
 
-If it's useful to know which of these matter most for what's currently
-blocked:
+All nine items — the original six, the FSM-def follow-up, and both
+bugs found along the way — are resolved as of xolu v0.27.0. Synced
+xoluman against v0.27.1 as well (2026-08-04): reviewed directly, the
+only change in that release is `CreateMachineDef`/`ReplaceMachineDef`
+client-side validation for Seam AMS's own request (T-162) — confirmed
+xoluman doesn't call either method yet (T-14, the FSM def module, isn't
+built), so this was a clean version bump with no code changes needed.
 
-1. **#1 (blob methods)** and **#5 (Health() auth)** — the first blocks
-   a directly-requested feature; the second is a correctness gap in
-   something already shipped.
-2. **#2 (export)** and **#3 (raw request)** — each blocks one specific,
-   already-designed xoluman feature (backup; the REST query console).
-3. **#4 (schema registration)** — blocks part of a feature (T-09) that
-   isn't the current focus.
-4. **#6 (doc/comment inconsistencies)** — no urgency, just worth
-   fixing when convenient.
-
-None of this is being implemented xoluman-side against your working
-copy. Whatever you decide — including "no" on any of it — xoluman's own
-tracking (`docs/TRACKING.md`, item T-13) picks back up from your
-response.
+Nothing outstanding needs a response. The two minor items noted in
+passing above — the stale `apikey` doc comment (#5) and this letter's
+own note in #6 — are both five-minute-confirm category, not urgent,
+not blocking anything. Whatever turns up next, xoluman's own tracking
+(`docs/TRACKING.md`) is where it'll start, same as always.

@@ -174,13 +174,14 @@ func TestParseFormValues_ArrayFieldValidJSON(t *testing.T) {
 	}
 }
 
-func TestParseFormValues_RefFieldNoKnownTarget_FallsBackToBareNumber(t *testing.T) {
-	// nil refTargets (or no entry for this field) means the target
-	// entity type isn't known — a schema-less/inferred field list, or
-	// a polymorphic ref with no single target. Falls back to a bare
-	// numeric value, which xolu will reject on write with its own
-	// clear validation error rather than xoluman guessing which
-	// entity type this points at.
+func TestParseFormValues_RefFieldNoKnownTarget_NoEntitySupplied_FallsBackToBareNumber(t *testing.T) {
+	// No refTargets entry (schema doesn't declare a target) AND no
+	// f.Name+"__ref_entity" companion value supplied — the person
+	// left the entity-type input blank. Falls back to a bare numeric
+	// value, which xolu will reject on write with its own clear
+	// validation error; that's the correct outcome for a genuinely
+	// unspecified target, not a silent guess. See the next test for
+	// the actual fix: when the companion field IS supplied.
 	fields := []client.FieldDef{{Name: "author_id", Type: "integer", Format: "ref"}}
 	form := url.Values{"author_id": {"7"}}
 	values, errs := ParseFormValues(fields, form, nil)
@@ -190,6 +191,52 @@ func TestParseFormValues_RefFieldNoKnownTarget_FallsBackToBareNumber(t *testing.
 	}
 	if values["author_id"] != float64(7) {
 		t.Fatalf("values[author_id] = %v, want float64(7)", values["author_id"])
+	}
+}
+
+func TestParseFormValues_RefFieldNoKnownTarget_EntitySupplied_BuildsStructuredWriteShape(t *testing.T) {
+	// The actual fix: a real, previously unsolved gap where a ref
+	// field whose schema doesn't declare a target (confirmed this is
+	// exactly what examples/crm's own seed script does for every ref
+	// field except users') could never be written at all — every
+	// create or update touching such a field was unconditionally
+	// rejected by xolu, regardless of what was typed, since a bare ID
+	// is not a valid REF value. refInput now renders a companion
+	// f.Name+"__ref_entity" input for exactly this case; this is what
+	// consuming it looks like. Verified end-to-end against the real
+	// CRM demo through xoluman's actual web form, not just this unit
+	// test in isolation — both create and update genuinely succeed
+	// now.
+	fields := []client.FieldDef{{Name: "author_id", Type: "integer", Format: "ref"}}
+	form := url.Values{"author_id": {"7"}, "author_id__ref_entity": {"users"}}
+	values, errs := ParseFormValues(fields, form, nil)
+
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	got, ok := values["author_id"].(map[string]any)
+	if !ok {
+		t.Fatalf("values[author_id] = %v (%T), want a structured REF map", values["author_id"], values["author_id"])
+	}
+	if got["type"] != "REF" || got["entity"] != "users" || got["id"] != int64(7) {
+		t.Fatalf("values[author_id] = %+v, want {type:REF, entity:users, id:7}", got)
+	}
+}
+
+func TestParseFormValues_RefFieldNoKnownTarget_WhitespaceOnlyEntitySupplied_FallsBack(t *testing.T) {
+	// A companion field present but blank/whitespace (e.g. the person
+	// opened the field and didn't type anything) must not be treated
+	// as "entity type: ''" — same honest fallback as no companion
+	// field at all, not a structured shape with an empty entity name.
+	fields := []client.FieldDef{{Name: "author_id", Type: "integer", Format: "ref"}}
+	form := url.Values{"author_id": {"7"}, "author_id__ref_entity": {"   "}}
+	values, errs := ParseFormValues(fields, form, nil)
+
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v, want none", errs)
+	}
+	if values["author_id"] != float64(7) {
+		t.Fatalf("values[author_id] = %v, want float64(7) (fallback, not a structured shape with an empty entity)", values["author_id"])
 	}
 }
 

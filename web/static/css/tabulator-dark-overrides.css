@@ -11,84 +11,155 @@
  * between Tabulator's own light/dark themes — a different theming
  * mechanism from the rest of xoluman, which is built entirely around
  * one `dark` class on <html> that every `dark:` Tailwind utility
- * already responds to (theme.js sets it; tailwind.config.js's own
- * `darkMode: 'class'`). This file extends that same single mechanism
+ * already responds to. This file extends that same single mechanism
  * to Tabulator instead of introducing a second one, with colors drawn
  * from xoluman's own Tailwind gray scale (gray-800/700/600/100) and
- * indigo accent (indigo-600/500 — the same accent used for every
- * primary button and link elsewhere in the app), not Tabulator's own
- * default blue.
+ * indigo accent, not Tabulator's own default blue.
  *
- * A real gap this fixes, reported directly: the theme toggle existed
- * but wasn't "uniformly observed in all the components" — this was
- * one of them. See docs/KNOWN_ISSUES.md for the fuller account of
- * what else this pass covered and why the gap existed in the first
- * place (a note in modal.js's own history — dark-mode support was
- * explicitly dropped as "not yet needed" well before the toggle
- * existed to need it).
+ * Every rule here uses !important, found necessary via real visual
+ * verification (Playwright screenshot + computed-style inspection),
+ * not assumed as defensive boilerplate: Tabulator's own selectors are
+ * frequently compound (e.g. `.tabulator .tabulator-header
+ * .tabulator-col`, three classes) and beat a plain `.dark
+ * .tabulator-col` (two classes) on specificity regardless of source
+ * order, since CSS specificity always wins over later-in-file
+ * position when the specificities differ. The first version of this
+ * file only had !important on two rules, added ad hoc rather than
+ * systematically — most of the file was silently losing to Tabulator's
+ * own light-theme defaults the whole time, which is what a direct
+ * report of the grid "still looking bad in dark mode" turned out to
+ * mean. Matching or exceeding every individual selector's specificity
+ * by hand across a stylesheet this size is fragile and easy to get
+ * subtly wrong one rule at a time; !important throughout a dedicated,
+ * single-purpose override file is the standard, deliberate pattern
+ * for this situation, not a shortcut.
  */
 
 .dark .tabulator {
-  background-color: #1f2937; /* gray-800 */
-  border-color: #374151; /* gray-700 */
-  color: #f3f4f6; /* gray-100 */
+  background-color: #1f2937 !important; /* gray-800 */
+  border-color: #374151 !important; /* gray-700 */
+  color: #f3f4f6 !important; /* gray-100 */
 }
 
 .dark .tabulator-header,
 .dark .tabulator-col,
 .dark .tabulator-footer {
-  background-color: #374151; /* gray-700 */
-  color: #f3f4f6; /* gray-100 */
-  border-color: #4b5563; /* gray-600 */
+  background-color: #374151 !important; /* gray-700 */
+  color: #f3f4f6 !important; /* gray-100 */
+  border-color: #4b5563 !important; /* gray-600 */
+}
+
+.dark .tabulator-col-title {
+  color: #f3f4f6 !important; /* gray-100 — Tabulator's own header title span sets its own color separately from .tabulator-col's */
 }
 
 .dark .tabulator-col-resize-handle {
-  background-color: #4b5563; /* gray-600 */
+  background-color: #4b5563 !important; /* gray-600 */
+}
+
+.dark .tabulator-tableholder {
+  background-color: #1f2937 !important; /* gray-800 — otherwise transparent, showing through to whatever's behind it rather than a deliberate color */
+}
+
+.dark .tabulator-table {
+  background-color: #1f2937 !important; /* gray-800 — the inner table element itself has a hardcoded white background; rows sit on top of it, but any gap shows this through */
 }
 
 .dark .tabulator-row {
   background-color: #1f2937 !important; /* gray-800 */
-  color: #f3f4f6; /* gray-100 */
+  color: #f3f4f6 !important; /* gray-100 */
 }
 
 .dark .tabulator-row.tabulator-row-even {
-  background-color: #263244; /* between gray-800 and gray-700 — a subtle stripe, same relative contrast as the light theme's own row/row-even pair */
+  background-color: #263244 !important; /* between gray-800 and gray-700 — a subtle stripe, same relative contrast as the light theme's own row/row-even pair */
 }
 
 .dark .tabulator-row:hover {
-  background-color: #2d3b4f;
+  background-color: #2d3b4f !important;
 }
 
 .dark .tabulator-cell {
-  border-right-color: #374151; /* gray-700 */
+  border-right-color: #374151 !important; /* gray-700 */
+  color: #f3f4f6 !important; /* gray-100 — Tabulator's own .tabulator-cell rule sets color separately from the row's */
 }
 
-.dark .tabulator-row.tabulator-selected {
+.dark .tabulator-row.tabulator-selected,
+.dark .tabulator-row.tabulator-selected:hover {
   background-color: #4338ca !important; /* indigo-700 — a selected row needs to read clearly against the dark row background, one step darker than the indigo-600 accent used for interactive elements */
-  color: #ffffff;
+  color: #ffffff !important;
 }
 
 .dark .tabulator-cell.tabulator-editing {
-  border-color: #6366f1; /* indigo-500 */
-  background-color: #1f2937; /* gray-800 */
+  border-color: #6366f1 !important; /* indigo-500 */
+  background-color: #1f2937 !important; /* gray-800 */
 }
 
 .dark .tabulator-edit-list {
-  background-color: #1f2937; /* gray-800 */
-  border: 1px solid #374151; /* gray-700 */
+  background-color: #1f2937 !important; /* gray-800 */
+  border: 1px solid #374151 !important; /* gray-700 */
 }
 
 .dark .tabulator-edit-list-item {
-  color: #f3f4f6; /* gray-100 */
+  color: #f3f4f6 !important; /* gray-100 */
 }
 
 .dark .tabulator-edit-list-item.active,
 .dark .tabulator-edit-list-item:hover {
-  background-color: #4f46e5; /* indigo-600 */
-  color: #ffffff;
+  background-color: #4f46e5 !important; /* indigo-600 */
+  color: #ffffff !important;
 }
 
 .dark .tabulator-alert {
-  background-color: rgba(31, 41, 55, 0.9); /* gray-800 */
-  color: #f3f4f6; /* gray-100 */
+  background-color: rgba(31, 41, 55, 0.9) !important; /* gray-800 */
+  color: #f3f4f6 !important; /* gray-100 */
+}
+
+.dark .tabulator-alert-msg {
+  background-color: #1f2937 !important; /* gray-800 */
+  color: #f3f4f6 !important; /* gray-100 */
+  border-color: #374151 !important; /* gray-700 */
+}
+
+.dark .tabulator .tabulator-loader .tabulator-loader-msg {
+  background-color: #1f2937 !important; /* gray-800 */
+  color: #f3f4f6 !important; /* gray-100 */
+  border-color: #374151 !important; /* gray-700 */
+}
+
+/* Not dark-scoped, deliberately — same root cause visible in light
+   mode too, found via the same screenshot verification: Tabulator's
+   own base .tabulator rule sets background:#888 (a medium gray), and
+   neither .tabulator-tableholder nor .tabulator-table give it their
+   own opaque background, so that gray shows through in any empty
+   space below the last row when the mount is taller than its content
+   (the fixed height set in grid-editor.js). A real, pre-existing gap
+   in light mode too, not something dark mode introduced. */
+.tabulator-tableholder,
+.tabulator-table {
+  background-color: #ffffff !important;
+}
+
+/* Pagination footer controls (First/Prev/page number/Next/Last) —
+   reported directly as hard to read: Tabulator's own default button
+   styling assumes a light footer background, which no longer applies
+   once .tabulator-footer itself is dark. */
+.dark .tabulator-footer .tabulator-page {
+  background-color: #1f2937 !important; /* gray-800 */
+  color: #f3f4f6 !important; /* gray-100 */
+  border-color: #4b5563 !important; /* gray-600 */
+}
+
+.dark .tabulator-footer .tabulator-page.active {
+  background-color: #4f46e5 !important; /* indigo-600 */
+  color: #ffffff !important;
+  border-color: #4f46e5 !important;
+}
+
+.dark .tabulator-footer .tabulator-page:disabled,
+.dark .tabulator-footer .tabulator-page[disabled] {
+  color: #6b7280 !important; /* gray-500 — clearly muted, still legible against the dark footer, unlike the default light-theme disabled color */
+}
+
+.dark .tabulator-footer .tabulator-paginator {
+  color: #f3f4f6 !important; /* gray-100 */
 }

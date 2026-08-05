@@ -256,8 +256,10 @@ func TestConnectionsHandler_Delete_AlreadyGoneStillRedirects(t *testing.T) {
 
 func TestConnectionsHandler_TestUnsaved_ReachableAgainstRealServer(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		if r.URL.Path == "/api/v1/schemas" {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"schemas":[],"count":0}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -349,8 +351,10 @@ func TestConnectionsHandler_TestUnsaved_MalformedBody(t *testing.T) {
 
 func TestConnectionsHandler_Test_ReachableAgainstRealServer(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
+		if r.URL.Path == "/api/v1/schemas" {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"schemas":[],"count":0}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -417,5 +421,60 @@ func TestConnectionsHandler_Test_UnknownConnectionName(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "not found") {
 		t.Fatalf("body = %q, want a not-found fragment", rec.Body.String())
+	}
+}
+
+func TestConnectionsHandler_Test_WrongCredentialReportedAsUnreachable(t *testing.T) {
+	// The actual point of switching from Health() to TestConnection()
+	// (xolu v0.27.0, #5): Health() deliberately never applies the
+	// configured auth header, so a connection with a wrong or expired
+	// token looked identical to a correctly-configured one — "Test
+	// connection" could only ever confirm the server was reachable,
+	// never that the credential was accepted. This test proves the
+	// new behavior, not just that the happy path still works: a
+	// server that genuinely enforces a credential rejects the wrong
+	// one, and that must now surface as a failed test, not "ok."
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /health always succeeds, no auth check at all — matching
+		// real xolu's own deliberate behavior (same convention as
+		// /ready/version/metrics). Included specifically so this test
+		// proves something: with the old Health()-based
+		// implementation, this exact scenario (server reachable, auth
+		// wrong) would have incorrectly reported "reachable" — this
+		// test only means something because /health would still say
+		// yes.
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path == "/api/v1/schemas" && r.Header.Get("Authorization") == "ApiKey the-real-key" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"schemas":[],"count":0}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if _, err := store.Save(ctx, connstore.Connection{
+		ConnectionMeta: connstore.ConnectionMeta{Name: "wrong-key", BaseURL: upstream.URL, AuthMode: connstore.AuthAPIKey},
+		Token:          "the-wrong-key",
+	}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+
+	h := NewConnectionsHandler(store)
+	req := httptest.NewRequest(http.MethodPost, "/connections/wrong-key/test", nil)
+	req.SetPathValue("name", "wrong-key")
+	rec := httptest.NewRecorder()
+
+	h.Test(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "unreachable") {
+		t.Fatalf("body = %q, want an unreachable/failed fragment — the configured credential is wrong", body)
 	}
 }

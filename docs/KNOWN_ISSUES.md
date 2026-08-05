@@ -1,4 +1,4 @@
-Version: 0.6.17
+Version: 0.7.3
 Last reviewed: 2026-08-03
 
 # xoluman — Known Issues and Recorded Decisions
@@ -107,6 +107,52 @@ in `TRACKING.md`, not here.
   `"firstmatch"` (required, no default); a transition's `Output` must
   already appear in `MachineSpec.OutputAlphabet` or validation rejects
   it with `XOLU-FSM006`.
+- **Ref fields whose schema doesn't declare a target need the person
+  to specify the target entity type by hand — there's no way to infer
+  it.** Real gap closed in xoluman v0.6.23 (T-24's second half): when
+  a ref field's schema is just `{"format":"ref"}` with no `"target"` —
+  confirmed this is exactly what `examples/crm`'s own seed script does
+  for every ref field except `users`' — every create or update
+  touching that field was previously rejected outright, since xolu
+  requires a fully-qualified `{"type":"REF","entity":"...","id":N}`
+  and there was no way to build one. Fixed with a companion
+  `f.Name+"__ref_entity"` text input rendered alongside the ID input
+  specifically for this case. The honest remaining limit: this can't
+  be pre-filled from a plain read — xolu's own embedded read-shape for
+  a ref value doesn't self-identify its target entity type (confirmed
+  directly, not assumed), so editing an *existing* value means
+  re-typing the entity type each time, not just the ID. It does
+  pre-fill correctly when redisplaying after a validation error, since
+  the write-shape from what was actually submitted carries `entity`
+  already.
+- **A severe, silent xolu client bug, found and fixed in v0.27.0:
+  `apikey` auth mode sent the wrong header format since the option
+  existed.** `Client.WithAPIKey` sent `Authorization: Bearer <key>`;
+  the server's own `apikey` validator only ever accepted
+  `X-API-Key: <key>` or `Authorization: ApiKey <key>` — never Bearer.
+  Every xoluman connection configured with `auth_mode=apikey` against
+  a server that actually enforces credentials was silently
+  unauthenticated on every single request, regardless of how correct
+  the key was — confirmed empirically against a real, credential-
+  enforcing v0.27.0 server before trusting the xolu team's own fix
+  (the old header genuinely gets a 401; the new one genuinely gets
+  200). xoluman's own test for this (`TestBuildClient_AuthModeAPIKey_
+  SendsBearerToken`, since renamed) had the identical blind spot the
+  xolu team found in their own suite: it only ever recorded what
+  header was sent, so it would have passed against the broken behavior
+  too — a mock-based assertion can't catch a bug like this, only a
+  real, enforcing server can. If any real xoluman connection ever used
+  `apikey` auth against a server enforcing it, it's worth confirming
+  it's actually authenticating now, not just reachable.
+- **`Client.Health()` never applied the configured auth header — by
+  design, not a bug — so xoluman's "Test connection" could only ever
+  confirm reachability, never that the credential was valid.** Fixed
+  in xoluman v0.6.23 by switching both Test/TestUnsaved handlers to
+  the new `Client.TestConnection()` (xolu v0.27.0, hits the genuinely
+  authenticated `GET /api/v1/schemas`). `Health()` itself is correctly
+  unauthenticated by design (matches `/ready`/`/version`/`/metrics` —
+  an orchestrator liveness probe shouldn't need a credential); the fix
+  was calling the right method for the job, not changing `Health()`.
 - **xolu REF field values are not what a first read of the field's
   name suggests, and this was wrong for the whole life of the ref-
   navigation feature (T-15) until a real end-to-end write-then-read

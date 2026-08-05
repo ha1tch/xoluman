@@ -93,6 +93,26 @@ type RenderOptions struct {
 	// navigating to see what it currently points at are two different
 	// actions, both available side by side.
 	RefLinks map[string]RefLink
+
+	// RefTargets names the target entity type for a ref field, when
+	// the schema declares one. A field present here renders as a
+	// single ID input, same as always. A ref field ABSENT here (no
+	// entry at all, not even empty) is the real gap this closes: many
+	// real schemas declare a ref field as {"format":"ref"} with no
+	// "target" at all — confirmed directly, this is what examples/
+	// crm's own seed script does for every ref field except users' —
+	// and xolu itself has no way to accept a write for such a field
+	// without being told which entity type it points to; there is no
+	// way to infer this from the schema or from a read response
+	// (checked directly: the embedded read-shape doesn't self-
+	// identify its own entity type either). Previously this silently
+	// fell back to submitting a bare ID, which xolu correctly and
+	// unconditionally rejects — every create or update touching such
+	// a field failed, which was the real, unresolved core of "saving
+	// doesn't work." refInput renders a companion entity-type input
+	// for exactly these fields now, and ParseFormValues uses it when
+	// present.
+	RefTargets map[string]string
 }
 
 // RenderFields renders one labeled input row per field, in the order
@@ -125,9 +145,25 @@ func renderField(b *mi.Builder, f client.FieldDef, opts RenderOptions) mi.Node {
 		// a dropdown regardless of its underlying JSON Schema type.
 		input = selectInput(b, f, values, disabled, opts.FieldOptions[f.Name])
 	case f.Format == "ref" || f.Type == "ref":
-		input = refInput(b, f, values, disabled)
+		_, targetKnown := opts.RefTargets[f.Name]
+		input = refInput(b, f, values, disabled, targetKnown)
 		if rl, ok := opts.RefLinks[f.Name]; ok {
-			refLink = b.A(mi.Href(rl.URL), mi.Class(refLinkClass), "→ "+rl.Label)
+			// The bolt icon opens rl.URL in a modal instead of a full
+			// navigation — self-contained here rather than calling into
+			// internal/ui (which imports this package, so the reverse
+			// would be an import cycle); ui.RefJumpButton renders the
+			// identical markup for the list-preview's own ref links.
+			refLink = b.Span(
+				b.A(mi.Href(rl.URL), mi.Class(refLinkClass), "→ "+rl.Label),
+				b.Button(
+					mi.Type("button"),
+					mi.Class("inline-flex items-center ml-1 text-gray-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-pointer border-0 bg-transparent p-0 align-middle"),
+					mi.Attr("title", "Open in a modal"),
+					mi.HxGet(rl.URL), mi.HxTarget("#modal-body"), mi.HxSwap("innerHTML"),
+					mi.Attr("onclick", "XModal.open('Loading…')"),
+					mi.Raw(`<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>`),
+				),
+			)
 		}
 	case f.Type == "boolean":
 		input = checkboxInput(b, f, values, disabled)
@@ -225,10 +261,40 @@ func textInput(b *mi.Builder, f client.FieldDef, values Values, disabled bool) m
 // just the ID regardless of which of the three real shapes (bare
 // number, xolu's write shape, xolu's read shape) the value happens to
 // be in.
-func refInput(b *mi.Builder, f client.FieldDef, values Values, disabled bool) mi.Node {
+//
+// When targetKnown is false, a companion entity-type text input is
+// rendered alongside the ID input (name: f.Name+"__ref_entity") — see
+// RefTargets' own doc comment for why this exists: a real, previously
+// unsolved gap where such a field could never be written at all.
+func refInput(b *mi.Builder, f client.FieldDef, values Values, disabled bool, targetKnown bool) mi.Node {
 	attrs := append([]mi.Attribute{mi.Type("text")}, baseAttrs(f, disabled)...)
 	attrs = append(attrs, mi.Value(refFieldValue(values.Get(f.Name))))
-	return b.Input(attrs...)
+	idInput := b.Input(attrs...)
+	if targetKnown {
+		return idInput
+	}
+
+	entityAttrs := []mi.Attribute{
+		mi.Type("text"), mi.ID(f.Name + "__ref_entity"), mi.Name(f.Name + "__ref_entity"),
+		mi.Class(inputClass), mi.Attr("placeholder", "entity type, e.g. users"),
+		mi.Value(refFieldEntity(values.Get(f.Name))),
+	}
+	if disabled {
+		entityAttrs = append(entityAttrs, mi.Attr("disabled", "disabled"))
+	}
+	if f.Required {
+		entityAttrs = append(entityAttrs, mi.Required())
+	}
+	return b.Div(mi.Class("flex gap-2"),
+		b.Div(mi.Class("flex-1"),
+			b.Label(mi.Class("block text-xs text-gray-500 dark:text-gray-500 mb-0.5"), "entity type"),
+			b.Input(entityAttrs...),
+		),
+		b.Div(mi.Class("flex-1"),
+			b.Label(mi.Class("block text-xs text-gray-500 dark:text-gray-500 mb-0.5"), "id"),
+			idInput,
+		),
+	)
 }
 
 // refFieldValue extracts a ref field's target ID as a plain string,
@@ -251,6 +317,24 @@ func refFieldValue(v any) string {
 	default:
 		return ""
 	}
+}
+
+// refFieldEntity extracts a ref field's target entity type from the
+// write-shape ({"type":"REF","entity":"...","id":N}) when the current
+// value happens to be in that shape — e.g. redisplaying a form after
+// a validation error, where ParseFormValues already built the write
+// shape from what was submitted. Returns "" for every other shape
+// (xolu's read-shape embeds the target's own document, which does not
+// self-identify its entity type — confirmed directly, not assumed),
+// which is the honest, correct answer: there is nothing to prefill
+// from a plain read.
+func refFieldEntity(v any) string {
+	if m, ok := v.(map[string]any); ok {
+		if entity, ok := m["entity"].(string); ok {
+			return entity
+		}
+	}
+	return ""
 }
 
 // inputTypeFor maps a JSON Schema "format" to the closest native HTML

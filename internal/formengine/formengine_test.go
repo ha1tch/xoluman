@@ -136,6 +136,68 @@ func TestRenderFields_NoRefLinkWhenNotConfigured(t *testing.T) {
 	}
 }
 
+func TestRenderFields_RefFieldKnownTarget_NoCompanionEntityInput(t *testing.T) {
+	// When the schema declares a target (present in RefTargets), the
+	// field renders as it always has — just the ID input. The
+	// companion entity-type input is specifically for the unknown-
+	// target case; rendering it unconditionally would be a regression
+	// for the common case where the schema already says enough.
+	fields := []client.FieldDef{{Name: "author_id", Type: "integer", Format: "ref"}}
+	html := mi.RenderToString(RenderFields(fields, RenderOptions{
+		Values:     Values{"author_id": float64(7)},
+		RefTargets: map[string]string{"author_id": "users"},
+	}))
+	if strings.Contains(html, "__ref_entity") {
+		t.Fatalf("html = %q, want no companion entity-type input when the target is already known", html)
+	}
+	if !strings.Contains(html, `value="7"`) {
+		t.Fatalf("html = %q, want the ID input still present", html)
+	}
+}
+
+func TestRenderFields_RefFieldUnknownTarget_RendersCompanionEntityInput(t *testing.T) {
+	// The actual fix: a ref field with no entry in RefTargets at all
+	// (schema doesn't declare a target — confirmed this is exactly
+	// what examples/crm's own seed script does for every ref field
+	// except users') gets a companion entity-type input, not just a
+	// bare ID input that could never produce a valid write.
+	fields := []client.FieldDef{{Name: "owner", Type: "integer", Format: "ref", Required: true}}
+	html := mi.RenderToString(RenderFields(fields, RenderOptions{
+		Values: Values{"owner": float64(5)},
+		// RefTargets present but with no entry for "owner" — the real
+		// shape resolveFormOptions produces for a schema that
+		// declares this ref field without a target.
+		RefTargets: map[string]string{},
+	}))
+	if !strings.Contains(html, `name="owner__ref_entity"`) {
+		t.Fatalf("html = %q, want a companion entity-type input named owner__ref_entity", html)
+	}
+	if !strings.Contains(html, `name="owner"`) {
+		t.Fatalf("html = %q, want the original ID input still present, named owner", html)
+	}
+	if !strings.Contains(html, `value="5"`) {
+		t.Fatalf("html = %q, want the ID input's current value preserved", html)
+	}
+}
+
+func TestRenderFields_RefFieldUnknownTarget_PrefillsEntityFromWriteShape(t *testing.T) {
+	// Redisplaying a form after a validation error: ParseFormValues
+	// already built the write-shape map from what was submitted, so
+	// the companion input should come back prefilled rather than
+	// forcing the person to retype the entity type they already gave.
+	fields := []client.FieldDef{{Name: "owner", Type: "integer", Format: "ref"}}
+	html := mi.RenderToString(RenderFields(fields, RenderOptions{
+		Values:     Values{"owner": map[string]any{"type": "REF", "entity": "users", "id": int64(5)}},
+		RefTargets: map[string]string{},
+	}))
+	if !strings.Contains(html, `name="owner__ref_entity"`) {
+		t.Fatalf("html = %q, want the companion input present", html)
+	}
+	if !strings.Contains(html, `value="users"`) {
+		t.Fatalf("html = %q, want the companion input prefilled with \"users\" from the write-shape value", html)
+	}
+}
+
 func TestRenderFields_StringField(t *testing.T) {
 	fields := []client.FieldDef{{Name: "title", Type: "string"}}
 	html := render(fields, Values{"title": "Hello"}, nil, nil)

@@ -263,6 +263,9 @@ func connectionFromForm(form url.Values) connstore.Connection {
 // directly — no saved connection required, so a person can verify a
 // connection actually works before committing to saving it, from
 // inside the New Connection modal. Never touches the store.
+//
+// TestConnection, not Health — see Test's own doc comment below for
+// the full reasoning (a real gap, fixed in xolu v0.27.0).
 func (h *ConnectionsHandler) TestUnsaved(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		WriteFragment(w, statusFragment(false, "could not read the form"))
@@ -279,7 +282,7 @@ func (h *ConnectionsHandler) TestUnsaved(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 
 	c := xoluext.BuildClient(conn)
-	if err := c.Health(ctx); err != nil {
+	if err := c.TestConnection(ctx); err != nil {
 		WriteFragment(w, statusFragment(false, err.Error()))
 		return
 	}
@@ -317,11 +320,21 @@ func (h *ConnectionsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // Test is an htmx fragment endpoint: builds a client for the named
-// connection and calls Health, returning a small status span. Swapped
-// into the row's status cell by the Test button's hx-target. Unlike the
-// create/delete flows this is never a full-page navigation — it's always
-// a small in-place htmx swap, so it uses WriteFragment directly rather
-// than WriteModalAware.
+// connection and calls TestConnection, returning a small status span.
+// Swapped into the row's status cell by the Test button's hx-target.
+// Unlike the create/delete flows this is never a full-page navigation
+// — it's always a small in-place htmx swap, so it uses WriteFragment
+// directly rather than WriteModalAware.
+//
+// TestConnection, not Health — a real gap found and fixed by the xolu
+// team (v0.27.0, T-160/#5): Health() deliberately never applies the
+// configured auth header (matching /ready, /version, /metrics — an
+// orchestrator liveness check shouldn't need a credential), so it
+// could only ever confirm the server was reachable, never that the
+// configured token was actually valid. TestConnection hits GET
+// /api/v1/schemas — genuinely authenticated, cheap, works before a
+// tenant is even chosen — specifically built to be what a "test this
+// connection" button should call.
 func (h *ConnectionsHandler) Test(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	conn, err := h.store.Get(r.Context(), name)
@@ -334,7 +347,7 @@ func (h *ConnectionsHandler) Test(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	c := xoluext.BuildClient(conn)
-	if err := c.Health(ctx); err != nil {
+	if err := c.TestConnection(ctx); err != nil {
 		WriteFragment(w, statusFragment(false, err.Error()))
 		return
 	}

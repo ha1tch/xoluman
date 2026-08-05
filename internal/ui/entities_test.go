@@ -18,6 +18,7 @@ import (
 	xclient "github.com/ha1tch/xolu/pkg/client"
 
 	"github.com/ha1tch/xoluman/internal/connstore"
+	"github.com/ha1tch/xoluman/internal/fieldmeta"
 )
 
 // widgetsSchema is the JSON Schema fakeXoluWithWidgets serves for the
@@ -307,7 +308,7 @@ func TestBuildGridColumns_ExcludesObjectAndArray(t *testing.T) {
 		{Name: "metadata", Type: "object"},
 		{Name: "tags", Type: "array"},
 	}
-	cols := buildGridColumns(fields)
+	cols := buildGridColumns(fields, nil)
 
 	// id + title only — metadata/tags excluded
 	if len(cols) != 2 {
@@ -316,7 +317,7 @@ func TestBuildGridColumns_ExcludesObjectAndArray(t *testing.T) {
 }
 
 func TestBuildGridColumns_IDColumnNotEditable(t *testing.T) {
-	cols := buildGridColumns(nil)
+	cols := buildGridColumns(nil, nil)
 	if len(cols) != 1 || cols[0].Field != "id" {
 		t.Fatalf("cols = %+v, want just the id column for no fields", cols)
 	}
@@ -333,7 +334,7 @@ func TestBuildGridColumns_EditorPerType(t *testing.T) {
 		{Name: "author_id", Type: "integer", Format: "ref"},
 		{Name: "title", Type: "string"},
 	}
-	cols := buildGridColumns(fields)
+	cols := buildGridColumns(fields, nil)
 	byField := make(map[string]gridColumn)
 	for _, c := range cols {
 		byField[c.Field] = c
@@ -350,6 +351,57 @@ func TestBuildGridColumns_EditorPerType(t *testing.T) {
 		if byField[field].Editor != wantEditor {
 			t.Fatalf("column %q Editor = %v, want %v", field, byField[field].Editor, wantEditor)
 		}
+	}
+}
+
+func TestBuildGridColumns_ConfiguredFieldGetsListEditor(t *testing.T) {
+	// A field with xoluman_field_meta options configured (same source
+	// the entity form's own select fields use) gets Tabulator's "list"
+	// editor instead of a bare text input — matching the form's own
+	// dropdown for the identical field rather than leaving the grid as
+	// the one place still showing a raw value.
+	fields := []xclient.FieldDef{
+		{Name: "status", Type: "string"},
+		{Name: "title", Type: "string"},
+	}
+	fieldOptions := map[string][]fieldmeta.Option{
+		"status": {{Key: "open", Value: "Open"}, {Key: "closed", Value: "Closed"}},
+	}
+	cols := buildGridColumns(fields, fieldOptions)
+	byField := make(map[string]gridColumn)
+	for _, c := range cols {
+		byField[c.Field] = c
+	}
+
+	if byField["status"].Editor != "list" {
+		t.Fatalf("status column Editor = %v, want %q", byField["status"].Editor, "list")
+	}
+	params, ok := byField["status"].EditorParams.(listEditorParams)
+	if !ok {
+		t.Fatalf("status column EditorParams = %+v (%T), want listEditorParams", byField["status"].EditorParams, byField["status"].EditorParams)
+	}
+	if params.Values["open"] != "Open" || params.Values["closed"] != "Closed" {
+		t.Fatalf("status column EditorParams.Values = %+v, want open/closed mapped correctly", params.Values)
+	}
+
+	// title has no configured options — still a plain text input,
+	// unaffected by status being configured.
+	if byField["title"].Editor != "input" {
+		t.Fatalf("title column Editor = %v, want %q (unconfigured field unaffected)", byField["title"].Editor, "input")
+	}
+}
+
+func TestBuildGridColumns_EmptyOptionsListDoesNotForceListEditor(t *testing.T) {
+	// A fieldOptions entry present but empty (e.g. a misconfigured or
+	// still-resolving ref-sourced dropdown) must not produce a select
+	// editor with zero choices — falls back to the normal type-based
+	// dispatch instead.
+	fields := []xclient.FieldDef{{Name: "status", Type: "string"}}
+	fieldOptions := map[string][]fieldmeta.Option{"status": {}}
+	cols := buildGridColumns(fields, fieldOptions)
+
+	if cols[1].Editor != "input" {
+		t.Fatalf("status column Editor = %v, want %q for an empty options list", cols[1].Editor, "input")
 	}
 }
 
@@ -908,8 +960,8 @@ func TestEntitiesHandler_Show_ListsEntities(t *testing.T) {
 			t.Fatalf("body missing %q: %s", want, body)
 		}
 	}
-	if !strings.Contains(body, `href="/connections/test/entities/widgets/1/edit"`) {
-		t.Fatalf("body missing edit link for entity 1: %s", body)
+	if !strings.Contains(body, `hx-get="/connections/test/entities/widgets/1/edit"`) {
+		t.Fatalf("body missing the Edit modal trigger for entity 1: %s", body)
 	}
 }
 

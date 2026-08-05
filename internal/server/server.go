@@ -48,7 +48,10 @@ func New(store connstore.Store) http.Handler {
 	ui.RegisterEntitiesModule(reg, store)
 	ui.RegisterBlobsModule(reg, store)
 	ui.RegisterQueryModule(reg, store)
+	ui.RegisterDXPModule(reg, store)
+	ui.RegisterFSMModule(reg, store)
 	reg.MountAll(mux)
+	ui.SetSidebarStore(store)
 
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/connections", http.StatusSeeOther)

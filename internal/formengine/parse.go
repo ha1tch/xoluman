@@ -76,17 +76,29 @@ func ParseFormValues(fields []client.FieldDef, form url.Values, refTargets map[s
 			}
 			values[f.Name] = map[string]any{"type": "REF", "entity": refTargets[f.Name], "id": id}
 		case f.Format == "ref" || f.Type == "ref":
-			// No known target (schema-less/inferred, or a polymorphic
-			// ref with no single target type) — falls back to a bare
-			// numeric value. xolu will reject this on write with a
-			// clear validation error; that's the correct outcome here,
-			// not a silent guess at which entity type this points at.
-			v, err := strconv.ParseFloat(raw, 64)
+			// No known target from the schema — the companion
+			// f.Name+"__ref_entity" input (rendered by refInput for
+			// exactly this case; see RenderOptions.RefTargets' own
+			// doc comment) lets the person supply it directly. This
+			// closes what used to be a real, unconditional failure:
+			// every create or update touching such a field was
+			// rejected by xolu regardless of what was typed, since a
+			// bare ID is not a valid REF value and there was no way
+			// to build the real one. Still degrades honestly if left
+			// blank — xolu's own validation error is the correct
+			// outcome for a genuinely unspecified target, not a
+			// silent guess.
+			id, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
 				errs[f.Name] = "Must be a valid ID."
 				continue
 			}
-			values[f.Name] = v
+			entity := strings.TrimSpace(form.Get(f.Name + "__ref_entity"))
+			if entity == "" {
+				values[f.Name] = float64(id)
+				continue
+			}
+			values[f.Name] = map[string]any{"type": "REF", "entity": entity, "id": id}
 		case f.Type == "integer":
 			v, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
