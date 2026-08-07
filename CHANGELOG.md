@@ -2,6 +2,132 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.7.6] — 2026-08-06
+
+- **T-22 closed** (see `docs/RESOLVED.md`): backup/export UI. An
+  `Export` button on the connection row (matching Test/Delete's
+  placement) triggers `GET /connections/{name}/export`, which streams
+  a full tenant `.zip` straight through as the HTTP response via
+  `Client.Export` — correct `Content-Type`/`Content-Disposition`
+  headers, no server-side temp file. Deliberately no timeout shorter
+  than xolu's own polling — `r.Context()` is already tied to the
+  browser's connection lifecycle, the right cancellation signal for a
+  slow-but-healthy export. 3 new tests.
+  - Real end-to-end testing against the CRM example — not just the
+    unit tests — surfaced a genuine bug in xolu itself, not xoluman: a
+    bal-enabled tenant that had never run a rollup failed the export
+    outright, because bal's own setup eagerly creates its rollup
+    store's directory on startup before any rollup ever runs, and
+    xolu's `os.Stat`-based "never used" skip check saw a real
+    directory and didn't skip it — `pebble.Open(ReadOnly:true)` then
+    can't initialize the empty directory as a database. Filed and
+    fixed upstream as xolu's own T-163 (v0.27.2); see that project's
+    changelog for the full account. Re-verified afterward: a real
+    tenant export against the live CRM data now downloads a valid,
+    non-empty zip (29 files, including the bal/dxp/fsm data from this
+    session's own CRM extension) through xoluman.
+- Only one item remains open in the register: T-04 (the keyring
+  backend's live round-trip verification), which needs a real OS
+  keyring service to run against and can't be completed in this
+  sandbox.
+
+## [0.7.5] — 2026-08-05
+
+- **Graph viewer** — a new page (`/connections/{name}/graph`, "Graph"
+  in the connection dropdown) for visualizing arbitrary Sulpher query
+  results as a real diagram: type a query, run it, see the nodes and
+  edges, click either to inspect its data. Built as a genuine
+  extension of the FSM editor's canvas, not a second widget — direct
+  response to "a tailored version of the fsm-editor widget could do
+  that job without duplication, if we add configuration parameters."
+  - `internal/ui/query.go`: a new `POST /connections/{name}/query/graph`
+    endpoint runs the query via `Client.GraphQuery` and reshapes the
+    raw result rows into `{nodes, edges}`. The classification rule
+    (a node has `_id`+`type`; an edge has `from`/`rel`/`to` and no
+    `_id`) was confirmed by tracing Sulpher's own executor and then
+    running a real query against the CRM dataset to see the actual
+    JSON — not assumed from the source alone. Deduplicates both across
+    rows (normal for a multi-hop query, where the same node or edge
+    legitimately appears more than once). 4 new tests.
+  - `web/static/js/fsm-editor.js`: a `mode="graph"` branch throughout
+    — a query input and Run button replace the machine name/state/
+    transition fields, a read-only inspect panel replaces the
+    validation panel, and the FSM-editing hints (add state, add
+    transition) are replaced with "click a node or edge to inspect
+    it." Node labels pick a sensible display field (name/title/first+
+    last name) from the entity's own data rather than showing a raw
+    `"companies:6"` on the canvas. Selection tracking hooks the same
+    wrapped `draw()` used for fsm-mode's validation/layout-save
+    triggers, since the engine has no native selection-changed event
+    either way.
+  - Verified end-to-end with real mouse clicks, not simulated
+    selection: computed actual screen coordinates from the engine's
+    own `viewport` transform (`{x, y, k}`, confirmed against
+    `crossBrowserRelativeMousePos`'s own formula), clicked a real node
+    and a real edge midpoint, confirmed the inspect panel showed the
+    genuine entity data and the genuine `from`/`rel`/`to` respectively
+    — against real multi-hop CRM data (deals → contacts), in both
+    light and dark mode.
+
+## [0.7.4] — 2026-08-05
+
+- **FSM editor canvas rebuilt on Seam's actual widget, replacing the
+  from-scratch SVG canvas shipped in v0.7.3.** Direct question from
+  Horacio ("did you create an entirely new SVG widget instead of
+  using the one that came with Seam?") led to actually reading
+  `seam-fsm-editor.js` for the first time this session, rather than
+  trusting a prior session's summary that had gone stale. That file
+  turned out to be Seam's own substantially extended fork of Evan
+  Wallace's Finite State Machine Designer (MIT), not the bare
+  upstream — layered interaction animations (a pulsing in-progress
+  link, an eased snap-back when a drag fails to connect, hover/
+  selection halos, a pulsing group-selection halo for rubber-band
+  multi-select, momentum-based zoom, smooth label repositioning),
+  per-link `guard`/`action` properties with their own dialog, per-link
+  custom colours, and JSON/SVG/LaTeX export — none of which the v0.7.3
+  rebuild attempted to reproduce.
+  - `web/static/js/fsm-canvas-engine.js`: Seam's engine, copied in
+    directly with full MIT attribution, not rebuilt. One addition on
+    top of the fork: `linkProperties` gained a third field, `output`,
+    alongside the fork's existing `guard`/`action` — xolu's transition
+    model has a distinct output value neither Wallace's original nor
+    Seam's fork had a field for. Every place `guard`/`action` are
+    read, written, saved, or restored was extended to carry `output`
+    the same way.
+  - `web/static/js/fsm-editor.js`: replaced entirely — a new,
+    deliberately thin Lit shell modeled closely on Seam's own
+    integration pattern (the same canvas-context `Proxy` theming
+    trick, the same documented Engine API), owning only what's
+    specific to xoluman: conversion between the engine's own backup
+    format and xolu's real `MachineSpec`, local fsm-toolkit
+    validation, and layout persistence as `xoluman_fsm_layout` — split
+    out from the engine's combined backup object on save and merged
+    back in on load, keeping the "layout separate from the abstract
+    machine" principle even though the engine's own native format
+    keeps them together.
+  - Disclosed data-model gap: xolu's `Set` (a map of potentially
+    several variable assignments) is represented via the engine's
+    single free-text `action` field as a semicolon-separated
+    `key=value` list, parsed and re-serialized each round trip — a
+    disclosed convention, not a structured multi-assignment editor.
+  - **A real bug found by testing, not by reading the code**: the new
+    converter wasn't auto-populating `output_alphabet` from
+    transitions' output values, which xolu requires — every
+    transition carrying an output was unconditionally rejected.
+    Fixed, then verified for real: injected a new terminal state with
+    a transition carrying both an `output` and a `set` clause, saved
+    it, and confirmed via direct API fetch that xolu accepted and
+    persisted every field correctly (including the correct
+    `action`→`set` conversion), with the layout intact alongside it.
+  - Light/dark theme support re-created (not carried over — only the
+    engine file, not Seam's own shell, was reused) using the same
+    proxy/palette/global-variable-bridge approach as Seam's own shell.
+    Verified via computed style in both themes and a live,
+    no-reload theme toggle, not just code presence.
+  - Zero page errors across every test scenario; full CRUD (create,
+    load, edit, save) re-verified end-to-end against a real xolu
+    instance with the new engine in place.
+
 ## [0.7.3] — 2026-08-05
 
 - **T-14 closed** (see `docs/RESOLVED.md`): the FSM def module — a

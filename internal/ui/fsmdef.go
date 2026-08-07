@@ -242,6 +242,15 @@ func fsmPage(title, activePath string, body mi.H) mi.H {
 	return func(b *mi.Builder) mi.Node {
 		extraHead := []mi.Node{
 			b.Script(mi.Attr("type", "importmap"), mi.Raw(`{"imports":{"lit":"/static/vendor/lit@3.js"}}`)),
+			// Plain script, not a module — fsm-canvas-engine.js (Seam's
+			// own extended fork of Wallace's Finite State Machine
+			// Designer, reused directly rather than a from-scratch
+			// canvas; see fsm-editor.js's own top comment) exposes its
+			// API as globals (initFSM, draw, getBackupData, ...), which
+			// the Lit shell below calls directly. A plain <script> in
+			// <head> executes immediately, before the deferred module
+			// script that needs those globals to already exist.
+			b.Script(mi.Attr("src", "/static/js/fsm-canvas-engine.js")),
 			b.Script(mi.Attr("type", "module"), mi.Attr("src", "/static/js/fsm-editor.js")),
 		}
 		return PageWithHead(title, activePath, extraHead, body)(b)

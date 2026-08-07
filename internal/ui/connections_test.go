@@ -5,6 +5,7 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -346,6 +347,107 @@ func TestConnectionsHandler_TestUnsaved_MalformedBody(t *testing.T) {
 	// than panicking on a nil/empty request body.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d (a fragment response, not an error status)", rec.Code, http.StatusOK)
+	}
+}
+
+func TestConnectionsHandler_Export_StreamsZipWithCorrectHeaders(t *testing.T) {
+	zipBytes := []byte("PK\x03\x04fake-zip-content-for-testing")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/blob/export"):
+			// Returning status "complete" immediately on Start (rather
+			// than "running") means Client.Export's own poll loop never
+			// executes at all -- no need to wait out its real 2-second
+			// poll interval in this test.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ticket":"t1","status":"complete","blob_key":"export-1.zip"}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/blob/export-1.zip"):
+			w.Header().Set("Content-Type", "application/zip")
+			_, _ = w.Write(zipBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if _, err := store.Save(ctx, connstore.Connection{
+		ConnectionMeta: connstore.ConnectionMeta{Name: "up", BaseURL: upstream.URL, AuthMode: connstore.AuthNone, Tenant: "acme"},
+	}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+
+	h := NewConnectionsHandler(store)
+	req := httptest.NewRequest(http.MethodGet, "/connections/up/export", nil)
+	req.SetPathValue("name", "up")
+	rec := httptest.NewRecorder()
+
+	h.Export(rec, req)
+
+	if rec.Code != 0 && rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (or unset, meaning the default)", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Fatalf("Content-Type = %q, want application/zip", ct)
+	}
+	cd := rec.Header().Get("Content-Disposition")
+	if !strings.HasPrefix(cd, "attachment; filename=\"up-export-") || !strings.HasSuffix(cd, ".zip\"") {
+		t.Fatalf("Content-Disposition = %q, want an attachment filename shaped like up-export-<timestamp>.zip", cd)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), zipBytes) {
+		t.Fatalf("body = %q, want the real zip bytes streamed through unchanged", rec.Body.String())
+	}
+}
+
+func TestConnectionsHandler_Export_UnknownConnectionName(t *testing.T) {
+	store := newTestStore(t)
+	h := NewConnectionsHandler(store)
+	req := httptest.NewRequest(http.MethodGet, "/connections/nonexistent/export", nil)
+	req.SetPathValue("name", "nonexistent")
+	rec := httptest.NewRecorder()
+
+	h.Export(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = %d, want a not-found response for an unknown connection", rec.Code)
+	}
+}
+
+func TestConnectionsHandler_Export_UpstreamFailureDuringPollDoesNotPanic(t *testing.T) {
+	// A failed export job (xolu-side failure, not a transport error) --
+	// Client.Export returns a real error after Start succeeds. The
+	// handler has already set headers and can't cleanly report this to
+	// the browser (see Export's own doc comment on why) -- the
+	// contract under test here is specifically that it doesn't panic
+	// and doesn't hang, not that it produces a particular error body.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/blob/export") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ticket":"t1","status":"failed","error":"disk full"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	store := newTestStore(t)
+	ctx := context.Background()
+	if _, err := store.Save(ctx, connstore.Connection{
+		ConnectionMeta: connstore.ConnectionMeta{Name: "up", BaseURL: upstream.URL, AuthMode: connstore.AuthNone, Tenant: "acme"},
+	}); err != nil {
+		t.Fatalf("seeding store: %v", err)
+	}
+
+	h := NewConnectionsHandler(store)
+	req := httptest.NewRequest(http.MethodGet, "/connections/up/export", nil)
+	req.SetPathValue("name", "up")
+	rec := httptest.NewRecorder()
+
+	h.Export(rec, req) // must not panic
+
+	if len(rec.Body.Bytes()) != 0 {
+		t.Fatalf("body = %q, want empty (the job failed before any zip bytes were ever available to stream)", rec.Body.String())
 	}
 }
 

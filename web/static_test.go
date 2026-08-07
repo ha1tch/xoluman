@@ -55,6 +55,7 @@ var ownAuthoredJSFiles = []string{
 	"static/js/query-editor.js",
 	"static/js/dxp-editor.js",
 	"static/js/fsm-editor.js",
+	"static/js/fsm-canvas-engine.js",
 }
 
 func TestOwnAuthoredJSFilesPresent(t *testing.T) {

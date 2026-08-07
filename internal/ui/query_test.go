@@ -158,6 +158,156 @@ func TestQueryHandler_CreateSavedQuery_MissingNameRejected(t *testing.T) {
 	}
 }
 
+func TestQueryHandler_Graph_ClassifiesNodesAndEdges(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
+		// The real shape confirmed directly against a running xolu
+		// instance, not assumed: a node has "_id" and "type"; an edge
+		// has "from"/"rel"/"to" and no "_id" at all.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "completed",
+			"result": []map[string]any{
+				{
+					"d": map[string]any{"_id": "1", "id": float64(1), "type": "deals", "name": "Big Deal"},
+					"r": map[string]any{"from": "deals:1", "rel": "primary_contact", "to": "contacts:17"},
+					"p": map[string]any{"_id": "17", "id": float64(17), "type": "contacts", "first_name": "Henry"},
+				},
+			},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(queryRunRequest{Query: "MATCH (d:deals)-[r:primary_contact]->(p:contacts) RETURN d, r, p"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got graphData
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if len(got.Nodes) != 2 {
+		t.Fatalf("got %d nodes, want 2 (one deal, one contact): %+v", len(got.Nodes), got.Nodes)
+	}
+	if len(got.Edges) != 1 {
+		t.Fatalf("got %d edges, want 1: %+v", len(got.Edges), got.Edges)
+	}
+	if got.Edges[0].From != "deals:1" || got.Edges[0].To != "contacts:17" || got.Edges[0].Rel != "primary_contact" {
+		t.Fatalf("edge = %+v, unexpected", got.Edges[0])
+	}
+}
+
+func TestQueryHandler_Graph_DeduplicatesNodesAndEdgesAcrossRows(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
+		row := map[string]any{
+			"d": map[string]any{"_id": "1", "id": float64(1), "type": "deals", "name": "Big Deal"},
+			"r": map[string]any{"from": "deals:1", "rel": "primary_contact", "to": "contacts:17"},
+			"p": map[string]any{"_id": "17", "id": float64(17), "type": "contacts", "first_name": "Henry"},
+		}
+		// Same deal, same edge, same contact -- appears identically in
+		// two rows, matching what a real multi-hop query naturally
+		// produces when two separate paths pass through the same node.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "completed",
+			"result": []map[string]any{row, row},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(queryRunRequest{Query: "MATCH (d:deals)-[r:primary_contact]->(p:contacts) RETURN d, r, p"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	var got graphData
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if len(got.Nodes) != 2 {
+		t.Fatalf("got %d nodes across 2 identical rows, want 2 deduplicated: %+v", len(got.Nodes), got.Nodes)
+	}
+	if len(got.Edges) != 1 {
+		t.Fatalf("got %d edges across 2 identical rows, want 1 deduplicated: %+v", len(got.Edges), got.Edges)
+	}
+}
+
+func TestQueryHandler_Graph_SkipsScalarValues(t *testing.T) {
+	// A query mixing an aggregate (e.g. COUNT(*)) with a node variable
+	// is valid Sulpher -- the scalar just isn't drawable, and must not
+	// crash the classification pass.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "completed",
+			"result": []map[string]any{
+				{
+					"d":     map[string]any{"_id": "1", "id": float64(1), "type": "deals", "name": "Big Deal"},
+					"total": float64(42),
+				},
+			},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(queryRunRequest{Query: "MATCH (d:deals) RETURN d, COUNT(*) AS total"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got graphData
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if len(got.Nodes) != 1 {
+		t.Fatalf("got %d nodes, want 1 (the scalar 'total' should be skipped, not crash or become a node)", len(got.Nodes))
+	}
+}
+
+func TestQueryHandler_Graph_EmptyResultReturnsEmptyArraysNotNull(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "result": []map[string]any{}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(queryRunRequest{Query: "MATCH (d:deals) WHERE false RETURN d"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "null") {
+		t.Fatalf("body = %q, want empty arrays not null (the JS side does .map/.forEach on these directly)", body)
+	}
+}
+
 func TestQueryHandler_DeleteSavedQuery(t *testing.T) {
 	var gotPath string
 	mux := http.NewServeMux()

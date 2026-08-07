@@ -1,4 +1,4 @@
-Version: 0.7.3
+Version: 0.7.6
 Last reviewed: 2026-08-03
 
 # xoluman — Known Issues and Recorded Decisions

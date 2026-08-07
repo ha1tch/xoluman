@@ -140,6 +140,7 @@ func connectionMenu(b *mi.Builder, connName, activePath string) mi.Node {
 		{"Query", "/query"},
 		{"DXP", "/dxp"},
 		{"FSM", "/fsm"},
+		{"Graph", "/graph"},
 	}
 
 	itemClass := "block px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 no-underline"

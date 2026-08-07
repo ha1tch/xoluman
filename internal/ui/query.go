@@ -7,6 +7,7 @@ package ui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -36,6 +37,8 @@ func RegisterQueryModule(reg *modules.Registry, store connstore.Store) {
 			mux.HandleFunc("GET /connections/{name}/query/saved", h.ListSavedQueries)
 			mux.HandleFunc("POST /connections/{name}/query/saved", h.CreateSavedQuery)
 			mux.HandleFunc("DELETE /connections/{name}/query/saved/{id}", h.DeleteSavedQuery)
+			mux.HandleFunc("POST /connections/{name}/query/graph", h.Graph)
+			mux.HandleFunc("GET /connections/{name}/graph", h.GraphView)
 		},
 	})
 }
@@ -67,6 +70,32 @@ func (h *queryHandler) View(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 	WriteHTML(w, queryPage("Query "+name, r.URL.Path, body))
+}
+
+// GraphView renders the graph viewer page — the same fsm-editor.js
+// Lit shell used for machine definitions, in mode="graph" (see that
+// file's own top comment on the split): a Sulpher query input instead
+// of the FSM name/state/transition fields, and click-to-inspect
+// instead of validation/save. Deliberately reuses fsmPage (loads the
+// same fsm-canvas-engine.js + fsm-editor.js scripts) rather than a
+// parallel page-shell function — this is one widget with two modes,
+// not two widgets.
+func (h *queryHandler) GraphView(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, err := h.store.Get(r.Context(), name); err != nil {
+		if errors.Is(err, connstore.ErrNotFound) {
+			writeConnectionNotFound(w, name)
+			return
+		}
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+
+	graphURL := "/connections/" + url.PathEscape(name) + "/query/graph"
+	body := func(b *mi.Builder) mi.Node {
+		return mi.Raw(`<xolu-fsm-editor mode="graph" graph-url="` + htmlEscape(graphURL) + `"></xolu-fsm-editor>`)
+	}
+	WriteHTML(w, fsmPage("Graph — "+name, r.URL.Path, body))
 }
 
 // queryPage wraps body in the shared shell plus the CodeMirror bundle
@@ -307,6 +336,101 @@ func (h *queryHandler) CreateSavedQuery(w http.ResponseWriter, r *http.Request) 
 }
 
 // DeleteSavedQuery removes one saved query by id.
+// graphNode and graphEdge are the shape the graph-mode fsm-editor.js
+// widget actually consumes — deliberately not xolu's own raw Sulpher
+// row shape, which mixes entity documents and relationship markers
+// together per-row with duplicates across rows. ID is "type:id",
+// matching the same format Sulpher's own edge from/to fields already
+// use (confirmed directly against a real query response, not assumed
+// from source) — so an edge's From/To can be used as a node lookup
+// key with no extra parsing.
+type graphNode struct {
+	ID   string         `json:"id"`
+	Type string         `json:"type"`
+	Data map[string]any `json:"data"`
+}
+
+type graphEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Rel  string `json:"rel"`
+}
+
+type graphData struct {
+	Nodes []graphNode `json:"nodes"`
+	Edges []graphEdge `json:"edges"`
+}
+
+// Graph runs a Sulpher query and reshapes the result into
+// {nodes, edges} — one pass over every value in every returned row,
+// classifying each by the markers Sulpher's own executor actually
+// emits (confirmed directly, not guessed): a node has both "_id" and
+// "type"; an edge has "from"/"rel"/"to" and no "_id". Anything else
+// (a scalar from an aggregate RETURN, for instance) is skipped, not
+// an error — a graph query mixing COUNT(*) with node variables is
+// valid Sulpher, just not something this view can draw.
+func (h *queryHandler) Graph(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	conn, err := h.store.Get(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, connstore.ErrNotFound) {
+			writeConnectionNotFound(w, name)
+			return
+		}
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	c := xoluext.BuildClient(conn)
+
+	var req queryRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	result, err := c.GraphQuery(r.Context(), req.Query, 0)
+	if err != nil {
+		writeJSONError(w, err, name)
+		return
+	}
+
+	data := graphData{Nodes: []graphNode{}, Edges: []graphEdge{}}
+	seenNodes := map[string]bool{}
+	seenEdges := map[string]bool{}
+	for _, row := range result.Result {
+		for _, v := range row {
+			m, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, hasID := m["_id"]; hasID {
+				typ, _ := m["type"].(string)
+				key := typ + ":" + fmt.Sprintf("%v", id)
+				if seenNodes[key] {
+					continue
+				}
+				seenNodes[key] = true
+				data.Nodes = append(data.Nodes, graphNode{ID: key, Type: typ, Data: m})
+				continue
+			}
+			from, hasFrom := m["from"].(string)
+			to, hasTo := m["to"].(string)
+			rel, _ := m["rel"].(string)
+			if hasFrom && hasTo {
+				key := from + "|" + rel + "|" + to
+				if seenEdges[key] {
+					continue
+				}
+				seenEdges[key] = true
+				data.Edges = append(data.Edges, graphEdge{From: from, To: to, Rel: rel})
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(data)
+}
+
 func (h *queryHandler) DeleteSavedQuery(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)

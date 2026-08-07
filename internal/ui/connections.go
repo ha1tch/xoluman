@@ -7,6 +7,8 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -46,6 +48,7 @@ func RegisterConnectionsModule(reg *modules.Registry, store connstore.Store) {
 			mux.HandleFunc("GET /connections/{name}/delete-confirm", conns.DeleteConfirm)
 			mux.HandleFunc("POST /connections/{name}/delete", conns.Delete)
 			mux.HandleFunc("POST /connections/{name}/test", conns.Test)
+			mux.HandleFunc("GET /connections/{name}/export", conns.Export)
 		},
 	})
 }
@@ -135,6 +138,7 @@ func connectionRow(b *mi.Builder, c connstore.Connection, index int) mi.Node {
 				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/entities"), mi.Class(btnSecondary), "Entities"),
 				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/blobs"), mi.Class(btnSecondary), "Blobs"),
 				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/query"), mi.Class(btnSecondary), "Query"),
+				b.A(mi.Href("/connections/"+url.PathEscape(c.Name)+"/export"), mi.Class(btnSecondary), mi.Attr("title", "Download a full tenant export (.zip)"), "Export"),
 				b.Button(
 					mi.Type("button"), mi.Class(btnSecondary),
 					mi.HxPost("/connections/"+url.PathEscape(c.Name)+"/test"),
@@ -352,6 +356,45 @@ func (h *ConnectionsHandler) Test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteFragment(w, statusFragment(true, "ok"))
+}
+
+// Export streams a full tenant export (a .zip, produced server-side by
+// xolu's pkg/tenantexport, delivered via Client.Export's async-poll-
+// download convenience method — see that method's own doc comment in
+// blob_export.go) straight through as the HTTP response, no
+// server-side temp file. Deliberately no timeout shorter than xolu's
+// own polling here (T-22's own design note) — Export's polling can
+// take a while on a large tenant, and r.Context() is already tied to
+// the browser's own connection lifecycle, which is the right
+// cancellation signal (the person closing the tab mid-download should
+// stop the export too), not an arbitrary deadline that would cut a
+// slow-but-healthy export short.
+func (h *ConnectionsHandler) Export(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	conn, err := h.store.Get(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, connstore.ErrNotFound) {
+			writeConnectionNotFound(w, name)
+			return
+		}
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return
+	}
+	c := xoluext.BuildClient(conn)
+
+	filename := fmt.Sprintf("%s-export-%s.zip", name, time.Now().UTC().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+	if _, err := c.Export(r.Context(), w); err != nil {
+		// Headers are already sent by this point (Go's http package
+		// flushes them on first Write, and Client.Export may have
+		// already written partial body bytes via io.Copy) -- a clean
+		// JSON or HTML error response is no longer possible. Logging
+		// is the honest option left; the browser gets a truncated,
+		// visibly-broken download rather than a silently-wrong one.
+		log.Printf("export failed for connection %q: %v", name, err)
+	}
 }
 
 func statusFragment(ok bool, detail string) mi.H {
