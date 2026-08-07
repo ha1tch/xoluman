@@ -3,6 +3,12 @@
 /coverage.out
 /coverage.html
 
+# examples/crm — built binaries and runtime data (the launcher builds
+# these into examples/crm/../../bin/ relative to its own repo root,
+# and seeds real data under examples/crm/xolu-crm-data/)
+/bin/
+/examples/crm/xolu-crm-data/
+
 # Local connection store (tokens/API keys) — never committed
 connections.json
 *.connections.json

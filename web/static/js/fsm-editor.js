@@ -76,6 +76,20 @@ function themedContext(rawCtx) {
 
 // setToAction/actionToSet: the disclosed Set<->action convention (see
 // this file's own top comment) — semicolon-separated key=value pairs.
+// isNodeSystemField and isRefValue together decide which of a
+// clicked node's fields the inspect panel offers for editing. System
+// fields (identity, not data) are always read-only. REF-typed fields
+// are also excluded here deliberately — retargeting a relationship
+// is a structural change to the graph itself, handled by the edge
+// form instead, not a side effect of editing a form field that
+// happens to hold a REF object.
+function isNodeSystemField(key) {
+  return key === '_id' || key === '_version' || key === 'id' || key === 'type';
+}
+function isRefValue(v) {
+  return v !== null && typeof v === 'object' && v.type === 'REF';
+}
+
 function setToAction(set) {
   if (!set) return '';
   return Object.entries(set).map(([k, v]) => `${k}=${v}`).join(';');
@@ -194,6 +208,9 @@ class XoluFsmEditor extends LitElement {
     _error: { state: true },
     _validation: { state: true },
     _inspecting: { state: true },
+    _inspectEdits: { state: true },
+    _inspectSaving: { state: true },
+    _inspectError: { state: true },
     _graphLoading: { state: true },
   };
 
@@ -216,6 +233,9 @@ class XoluFsmEditor extends LitElement {
     this._graphQuery = '';
     this._graphLoading = false;
     this._inspecting = null; // {kind: 'node'|'edge', label, data}
+    this._inspectEdits = {};
+    this._inspectSaving = false;
+    this._inspectError = null;
     this._lastSelectedObject = null;
   }
 
@@ -337,14 +357,93 @@ class XoluFsmEditor extends LitElement {
     const sel = typeof selectedObject !== 'undefined' ? selectedObject : null;
     if (sel === this._lastSelectedObject) return;
     this._lastSelectedObject = sel;
+    this._inspectError = null;
+    this._inspectSaving = false;
     if (!sel) {
       this._inspecting = null;
     } else if (sel._graphNode) {
       this._inspecting = { kind: 'node', label: sel.text, data: sel._graphNode.data };
+      // A fresh copy of the editable fields' current values -- kept
+      // separate from the node's own real data so typing into the
+      // form doesn't mutate anything until Save actually succeeds.
+      this._inspectEdits = {};
+      for (const [k, v] of Object.entries(this._inspecting.data)) {
+        if (!isNodeSystemField(k) && !isRefValue(v)) this._inspectEdits[k] = v;
+      }
     } else if (sel._graphEdge) {
       this._inspecting = { kind: 'edge', label: sel._graphEdge.rel, data: sel._graphEdge };
+      const [, targetID] = sel._graphEdge.to.split(':');
+      this._inspectEdits = { targetID };
     } else {
       this._inspecting = null;
+    }
+  }
+
+  async _saveInspectedNode() {
+    if (!this._inspecting || this._inspecting.kind !== 'node') return;
+    const node = this._lastSelectedObject;
+    const original = this._inspecting.data;
+    const changes = {};
+    for (const [k, v] of Object.entries(this._inspectEdits)) {
+      if (String(original[k] ?? '') !== String(v)) changes[k] = v;
+    }
+    if (Object.keys(changes).length === 0) return;
+
+    this._inspectSaving = true;
+    this._inspectError = null;
+    try {
+      const resp = await fetch(this.graphUrl + '/node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: original.type, id: original.id, changes }),
+      });
+      if (!resp.ok) {
+        this._inspectError = await resp.text();
+        this._inspectSaving = false;
+        return;
+      }
+      // The graph structure itself didn't change -- update the node's
+      // own data and label locally rather than re-running the whole
+      // query, which would also reset pan/zoom/layout for no reason.
+      Object.assign(original, changes);
+      node.text = this._labelForNode({ type: original.type, data: original });
+      this._inspecting = { ...this._inspecting, label: node.text, data: original };
+      if (typeof draw === 'function') draw();
+    } catch (e) {
+      this._inspectError = String(e);
+    }
+    this._inspectSaving = false;
+  }
+
+  async _saveInspectedEdge() {
+    if (!this._inspecting || this._inspecting.kind !== 'edge') return;
+    const edge = this._inspecting.data;
+    const [targetType] = edge.to.split(':');
+    const newTo = `${targetType}:${this._inspectEdits.targetID}`;
+    if (newTo === edge.to) return;
+
+    this._inspectSaving = true;
+    this._inspectError = null;
+    try {
+      const resp = await fetch(this.graphUrl + '/edge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: edge.from, relField: edge.rel, newTo }),
+      });
+      if (!resp.ok) {
+        this._inspectError = await resp.text();
+        this._inspectSaving = false;
+        return;
+      }
+      // Retargeting genuinely changes the graph's own structure (the
+      // edge may now point at a node not even in the currently-loaded
+      // set) -- re-running the query is the honest way to reflect
+      // that, not an attempt to surgically patch the canvas in place.
+      this._inspecting = null;
+      await this._runGraphQuery();
+    } catch (e) {
+      this._inspectError = String(e);
+      this._inspectSaving = false;
     }
   }
 
@@ -561,6 +660,17 @@ class XoluFsmEditor extends LitElement {
         .fsm-inspect-row { display:flex; gap:0.5rem; padding:0.15rem 0; font-family:monospace; font-size:0.75rem; }
         .fsm-inspect-key { color:${dark ? '#9ca3af' : '#6b7280'}; min-width:8rem; flex-shrink:0; }
         .fsm-inspect-val { word-break:break-all; }
+        .fsm-inspect-hint { font-style:italic; color:${dark ? '#6b7280' : '#9ca3af'}; }
+        .fsm-inspect-input {
+          flex:1; min-width:0; padding:1px 6px; font-family:monospace; font-size:0.75rem;
+          border:1px solid ${dark ? '#475569' : '#cbd5e1'}; border-radius:4px;
+          background:${dark ? '#111827' : '#fff'}; color:${dark ? '#e5e7eb' : '#111827'};
+        }
+        .fsm-inspect-error {
+          margin-top:6px; padding:4px 8px; border-radius:4px; font-size:0.75rem;
+          background:#fef2f2; border:1px solid #fecaca; color:#991b1b;
+        }
+        .dark .fsm-inspect-error { background:rgba(127,29,29,0.3); border-color:rgba(248,113,113,0.3); color:#fca5a5; }
       </style>
 
       <div class="fsm-header">
@@ -647,29 +757,85 @@ class XoluFsmEditor extends LitElement {
 
   // _renderInspectPanel is the direct answer to "click on nodes and
   // see a form with the data contained in the nodes, click on the
-  // edges and see the data contained in the edges" — every field from
-  // the clicked node's real entity document, or the clicked edge's
-  // from/rel/to, listed plainly. Read-only: this is a viewer, not an
-  // editor for graph data, which would be a genuinely separate,
-  // larger feature (write-back semantics for arbitrary entity types
-  // through a generic panel) not attempted here.
+  // edges and see the data contained in the edges" — and, since this
+  // turn's own ask, editable and saveable, not read-only. System
+  // fields (_id/_version/id/type) and REF-typed fields stay display-
+  // only here — REF fields specifically because retargeting a
+  // relationship is what the edge form is for, not a side effect of
+  // editing a node field that happens to hold a REF (see
+  // isNodeSystemField/isRefValue's own comment).
   _renderInspectPanel() {
     if (!this._inspecting) {
       return html`<div class="text-xs text-gray-400 dark:text-gray-500 mt-2">Run a query, then click a node or edge to inspect it.</div>`;
     }
     const { kind, label, data } = this._inspecting;
-    const entries = Object.entries(data || {});
+    const btnStyle = `display:inline-flex;align-items:center;gap:4px;padding:4px 10px;font-size:12px;font-weight:500;border-radius:6px;border:1px solid #4f46e5;background:#4f46e5;color:#fff;cursor:pointer`;
+
     return html`
       <div class="fsm-panel fsm-inspect">
         <div class="fsm-inspect-title">${kind === 'node' ? 'Node' : 'Edge'}: ${label}</div>
-        ${entries.map(
-          ([k, v]) => html`
-            <div class="fsm-inspect-row">
-              <span class="fsm-inspect-key">${k}</span>
-              <span class="fsm-inspect-val">${typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}</span>
-            </div>
-          `
-        )}
+
+        ${kind === 'node' ? this._renderNodeForm(data) : this._renderEdgeForm(data)}
+
+        ${this._inspectError ? html`<div class="fsm-inspect-error">${this._inspectError}</div>` : ''}
+
+        <button class="${btnStyle}" style="margin-top:8px"
+          ?disabled=${this._inspectSaving}
+          @click=${() => (kind === 'node' ? this._saveInspectedNode() : this._saveInspectedEdge())}>
+          ${this._inspectSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    `;
+  }
+
+  _renderNodeForm(data) {
+    const entries = Object.entries(data || {});
+    return entries.map(([k, v]) => {
+      if (isNodeSystemField(k)) {
+        return html`
+          <div class="fsm-inspect-row">
+            <span class="fsm-inspect-key">${k}</span>
+            <span class="fsm-inspect-val">${String(v)}</span>
+          </div>
+        `;
+      }
+      if (isRefValue(v)) {
+        return html`
+          <div class="fsm-inspect-row">
+            <span class="fsm-inspect-key">${k}</span>
+            <span class="fsm-inspect-val">${v.entity}:${v.id} <em class="fsm-inspect-hint">(retarget via its edge, not here)</em></span>
+          </div>
+        `;
+      }
+      return html`
+        <div class="fsm-inspect-row">
+          <span class="fsm-inspect-key">${k}</span>
+          <input class="fsm-inspect-input" type="text" .value=${String(this._inspectEdits[k] ?? '')}
+            @input=${(e) => (this._inspectEdits = { ...this._inspectEdits, [k]: e.target.value })} />
+        </div>
+      `;
+    });
+  }
+
+  _renderEdgeForm(edge) {
+    const [targetType] = (edge.to || '').split(':');
+    return html`
+      <div class="fsm-inspect-row">
+        <span class="fsm-inspect-key">from</span>
+        <span class="fsm-inspect-val">${edge.from}</span>
+      </div>
+      <div class="fsm-inspect-row">
+        <span class="fsm-inspect-key">rel</span>
+        <span class="fsm-inspect-val">${edge.rel}</span>
+      </div>
+      <div class="fsm-inspect-row">
+        <span class="fsm-inspect-key">to</span>
+        <span class="fsm-inspect-val">${targetType}:</span>
+        <input class="fsm-inspect-input" type="text" style="max-width:6rem" .value=${String(this._inspectEdits.targetID ?? '')}
+          @input=${(e) => (this._inspectEdits = { ...this._inspectEdits, targetID: e.target.value })} />
+      </div>
+      <div class="text-xs text-gray-400 dark:text-gray-500 mt-1">
+        Retargeting saves, then re-runs the current query — the graph's own shape changed.
       </div>
     `;
   }

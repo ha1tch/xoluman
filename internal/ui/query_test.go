@@ -7,6 +7,7 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -155,6 +156,151 @@ func TestQueryHandler_CreateSavedQuery_MissingNameRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestQueryHandler_SaveGraphNode_PatchesTheRightEntity(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":1}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	body, _ := json.Marshal(graphNodeSaveRequest{
+		Type: "deals", ID: 6,
+		Changes: map[string]any{"name": "Renamed via graph viewer"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/node", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.SaveGraphNode(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if gotMethod != http.MethodPatch {
+		t.Fatalf("upstream method = %q, want PATCH", gotMethod)
+	}
+	if !strings.HasSuffix(gotPath, "/deals/6") {
+		t.Fatalf("upstream path = %q, want it to target deals/6", gotPath)
+	}
+	if !strings.Contains(string(gotBody), "Renamed via graph viewer") {
+		t.Fatalf("upstream body = %s, want the changed field", gotBody)
+	}
+}
+
+func TestQueryHandler_SaveGraphNode_MissingTypeOrID(t *testing.T) {
+	store := seedConnection(t, "http://unused.invalid")
+	h := &queryHandler{store: store}
+
+	body, _ := json.Marshal(graphNodeSaveRequest{Changes: map[string]any{"name": "x"}})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/node", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.SaveGraphNode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d for a missing type/id", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestQueryHandler_SaveGraphEdge_RetargetsViaPatchOnSourceEntity(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":1}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	body, _ := json.Marshal(graphEdgeSaveRequest{
+		From: "deals:6", RelField: "primary_contact", NewTo: "contacts:22",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/edge", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.SaveGraphEdge(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if !strings.HasSuffix(gotPath, "/deals/6") {
+		t.Fatalf("upstream path = %q, want it to patch the SOURCE entity deals/6, not the target", gotPath)
+	}
+	ref, ok := gotBody["primary_contact"].(map[string]any)
+	if !ok {
+		t.Fatalf("patched body = %+v, want a primary_contact REF object", gotBody)
+	}
+	if ref["entity"] != "contacts" || ref["id"] != float64(22) || ref["type"] != "REF" {
+		t.Fatalf("REF value = %+v, want entity=contacts id=22 type=REF (the new target, not the old one)", ref)
+	}
+}
+
+func TestQueryHandler_SaveGraphEdge_MalformedReferenceIsRejected(t *testing.T) {
+	store := seedConnection(t, "http://unused.invalid")
+	h := &queryHandler{store: store}
+
+	body, _ := json.Marshal(graphEdgeSaveRequest{
+		From: "not-a-valid-reference", RelField: "primary_contact", NewTo: "contacts:22",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/edge", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.SaveGraphEdge(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d for a malformed \"from\" reference", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestParseGraphNodeID(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantType string
+		wantID   int64
+		wantErr  bool
+	}{
+		{"deals:6", "deals", 6, false},
+		{"contacts:123", "contacts", 123, false},
+		{"no-colon-here", "", 0, true},
+		{"deals:not-a-number", "", 0, true},
+		{"", "", 0, true},
+	}
+	for _, tc := range cases {
+		gotType, gotID, err := parseGraphNodeID(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("parseGraphNodeID(%q): got nil error, want one", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseGraphNodeID(%q): unexpected error: %v", tc.in, err)
+			continue
+		}
+		if gotType != tc.wantType || gotID != tc.wantID {
+			t.Errorf("parseGraphNodeID(%q) = (%q, %d), want (%q, %d)", tc.in, gotType, gotID, tc.wantType, tc.wantID)
+		}
 	}
 }
 

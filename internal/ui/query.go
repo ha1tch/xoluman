@@ -38,6 +38,9 @@ func RegisterQueryModule(reg *modules.Registry, store connstore.Store) {
 			mux.HandleFunc("POST /connections/{name}/query/saved", h.CreateSavedQuery)
 			mux.HandleFunc("DELETE /connections/{name}/query/saved/{id}", h.DeleteSavedQuery)
 			mux.HandleFunc("POST /connections/{name}/query/graph", h.Graph)
+			mux.HandleFunc("POST /connections/{name}/query/graph/node", h.SaveGraphNode)
+			mux.HandleFunc("POST /connections/{name}/query/graph/edge", h.SaveGraphEdge)
+			mux.HandleFunc("POST /connections/{name}/dxp/preset-run", h.RunDXPPreset)
 			mux.HandleFunc("GET /connections/{name}/graph", h.GraphView)
 		},
 	})
@@ -230,6 +233,14 @@ type savedQuery struct {
 	ContentType string `json:"contentType,omitempty"` // rest only
 	Body        string `json:"body,omitempty"`        // rest only
 	CreatedAt   string `json:"createdAt,omitempty"`
+
+	// dxp only — see internal/ui/dxppreset.go's own doc comment on
+	// what these mean and why a preset carries a resolver *name*
+	// (looked up in an in-code registry) rather than any executable
+	// logic of its own.
+	DxpDefName string               `json:"dxp_def_name,omitempty"`
+	Resolver   string               `json:"resolver,omitempty"`
+	FormFields []dxpPresetFormField `json:"form_fields,omitempty"`
 }
 
 // ListSavedQueries returns every saved query for the given mode,
@@ -240,8 +251,8 @@ type savedQuery struct {
 func (h *queryHandler) ListSavedQueries(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	mode := r.URL.Query().Get("mode")
-	if mode != "oql" && mode != "sulpher" && mode != "rest" {
-		http.Error(w, `mode must be "oql", "sulpher", or "rest"`, http.StatusBadRequest)
+	if mode != "oql" && mode != "sulpher" && mode != "rest" && mode != "dxp" {
+		http.Error(w, `mode must be "oql", "sulpher", "rest", or "dxp"`, http.StatusBadRequest)
 		return
 	}
 	conn, err := h.store.Get(r.Context(), name)
@@ -301,8 +312,8 @@ func (h *queryHandler) CreateSavedQuery(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Mode != "oql" && req.Mode != "sulpher" && req.Mode != "rest" {
-		http.Error(w, `mode must be "oql", "sulpher", or "rest"`, http.StatusBadRequest)
+	if req.Mode != "oql" && req.Mode != "sulpher" && req.Mode != "rest" && req.Mode != "dxp" {
+		http.Error(w, `mode must be "oql", "sulpher", "rest", or "dxp"`, http.StatusBadRequest)
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {
@@ -321,6 +332,10 @@ func (h *queryHandler) CreateSavedQuery(w http.ResponseWriter, r *http.Request) 
 		data["path"] = req.Path
 		data["content_type"] = req.ContentType
 		data["body"] = req.Body
+	case "dxp":
+		data["dxp_def_name"] = req.DxpDefName
+		data["resolver"] = req.Resolver
+		data["form_fields"] = req.FormFields
 	default:
 		data["query"] = req.Query
 	}
@@ -336,6 +351,130 @@ func (h *queryHandler) CreateSavedQuery(w http.ResponseWriter, r *http.Request) 
 }
 
 // DeleteSavedQuery removes one saved query by id.
+// graphNode and graphEdge are the shape the graph-mode fsm-editor.js
+// widget actually consumes — deliberately not xolu's own raw Sulpher
+// row shape, which mixes entity documents and relationship markers
+// together per-row with duplicates across rows. ID is "type:id",
+// matching the same format Sulpher's own edge from/to fields already
+// use (confirmed directly against a real query response, not assumed
+// from source) — so an edge's From/To can be used as a node lookup
+// key with no extra parsing.
+// parseGraphNodeID splits a "type:id" reference (the format both
+// graphNode.ID and graphEdge.From/To already use — see the Graph
+// handler's own doc comment on where that shape comes from) into its
+// two parts. The type may itself contain no colon (entity type names
+// don't), so a plain split on the first colon is sufficient and
+// unambiguous.
+func parseGraphNodeID(ref string) (entityType string, id int64, err error) {
+	idx := strings.IndexByte(ref, ':')
+	if idx < 0 {
+		return "", 0, fmt.Errorf("malformed node reference %q, want \"type:id\"", ref)
+	}
+	entityType = ref[:idx]
+	id, err = strconv.ParseInt(ref[idx+1:], 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf("malformed node reference %q: %w", ref, err)
+	}
+	return entityType, id, nil
+}
+
+type graphNodeSaveRequest struct {
+	Type    string         `json:"type"`
+	ID      int64          `json:"id"`
+	Changes map[string]any `json:"changes"`
+}
+
+// SaveGraphNode is the write side of the graph viewer's inspect
+// panel — a plain xolu Patch against whichever entity the clicked
+// node actually is, the same partial-update mechanism the grid editor
+// already uses (see GridSave in grid.go). Scalar fields only in
+// practice: the JS side deliberately doesn't offer editing for REF-
+// typed fields here (see fsm-editor.js's own comment on why) — those
+// go through SaveGraphEdge instead, where the relationship itself is
+// the thing being changed, not a side effect of editing a form field
+// that happens to hold a REF.
+func (h *queryHandler) SaveGraphNode(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	conn, err := h.store.Get(r.Context(), name)
+	if err != nil {
+		writeJSONError(w, err, name)
+		return
+	}
+	c := xoluext.BuildClient(conn)
+
+	var req graphNodeSaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Type == "" || req.ID <= 0 {
+		http.Error(w, "type and a positive id are required", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := c.Patch(r.Context(), req.Type, req.ID, req.Changes); err != nil {
+		writeJSONError(w, err, name)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type graphEdgeSaveRequest struct {
+	From     string `json:"from"`     // "type:id" -- the source entity whose REF field is being changed
+	RelField string `json:"relField"` // the field name on the source entity to update (matches the edge's own "rel")
+	NewTo    string `json:"newTo"`    // "type:id" -- the new target
+}
+
+// SaveGraphEdge retargets a relationship — since xolu's graph model
+// derives edges from a REF field on the source entity rather than a
+// first-class relationship object with its own properties (confirmed
+// directly against real query output when this endpoint's own read
+// side, Graph, was first built — see that handler's doc comment),
+// "editing an edge" means patching the source entity's own REF field
+// to point somewhere else. The target entity type is not user-
+// supplied here — it's read back from the edge being edited, since
+// retargeting a REF field to a different entity type than the field
+// was already pointing at is not a relationship edit, it's a schema
+// violation, and this endpoint should not be the place that allows it
+// silently.
+func (h *queryHandler) SaveGraphEdge(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	conn, err := h.store.Get(r.Context(), name)
+	if err != nil {
+		writeJSONError(w, err, name)
+		return
+	}
+	c := xoluext.BuildClient(conn)
+
+	var req graphEdgeSaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.RelField == "" {
+		http.Error(w, "relField is required", http.StatusBadRequest)
+		return
+	}
+
+	fromType, fromID, err := parseGraphNodeID(req.From)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	toType, toID, err := parseGraphNodeID(req.NewTo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	refValue := map[string]any{"entity": toType, "id": toID, "type": "REF"}
+	if _, err := c.Patch(r.Context(), fromType, fromID, map[string]any{req.RelField: refValue}); err != nil {
+		writeJSONError(w, err, name)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // graphNode and graphEdge are the shape the graph-mode fsm-editor.js
 // widget actually consumes — deliberately not xolu's own raw Sulpher
 // row shape, which mixes entity documents and relationship markers
@@ -471,5 +610,18 @@ func decodeSavedQuery(e xclient.Entity) (savedQuery, bool) {
 	s.ContentType, _ = e.Data["content_type"].(string)
 	s.Body, _ = e.Data["body"].(string)
 	s.CreatedAt, _ = e.Data["created_at"].(string)
+	s.DxpDefName, _ = e.Data["dxp_def_name"].(string)
+	s.Resolver, _ = e.Data["resolver"].(string)
+	if raw, ok := e.Data["form_fields"]; ok {
+		// form_fields arrives as []any (generic JSON decode), not
+		// []dxpPresetFormField directly -- round-trip it through
+		// json.Marshal/Unmarshal rather than hand-walking the
+		// interface{} shape, the same pattern xoluman uses wherever
+		// else a nested structure comes back from a generic entity
+		// document.
+		if b, err := json.Marshal(raw); err == nil {
+			_ = json.Unmarshal(b, &s.FormFields)
+		}
+	}
 	return s, true
 }

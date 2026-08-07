@@ -2,6 +2,114 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.7.9] — 2026-08-07
+
+- **CRM example**: both queries OQL's own JOIN bugs (see v0.7.8) had
+  blocked now work, via Sulpher instead — direct response to "can you
+  obtain using Sulpher what you couldn't obtain via JOIN?" Both
+  confirmed by actually running them, not assumed from the grammar:
+  - "Average deal size by company industry" — aggregation over a
+    graph traversal, real openCypher syntax (`MATCH (d)-[:company]->(c)
+    RETURN c.industry, count(d), avg(d.amount)` — implicit GROUP BY, a
+    non-aggregate return item alongside aggregate functions).
+  - "Contacts with no logged activity" — the genuine anti-join OQL
+    couldn't express at all. `OPTIONAL MATCH` + `WITH ... WHERE ... IS
+    NULL` is real openCypher's own equivalent, confirmed directly — 8
+    real contacts with zero activities.
+  - **A real, reproducible data-correctness finding surfaced while
+    confirming the first query**: deals whose `stage` was set via the
+    `close_deal_won`/`mark_deal_lost` DXP transactions show their
+    `amount` field as `null` through Sulpher graph queries specifically
+    — a field that DXP transaction never touches — even though a
+    direct REST fetch of the same deal confirms `amount` is present
+    and correct. Reproducible from the seed script itself. Documented
+    in a full writeup (delivered separately) and in a code comment
+    next to the affected query; not fixed, no xolu source touched.
+  - "Average deal size by stage" (OQL, single-table, no JOIN) restored
+    alongside the new industry-based Sulpher query — different,
+    complementary dimensions, not a replacement for each other.
+
+## [0.7.8] — 2026-08-07
+
+- **Graph node/edge editing** — the graph viewer's inspect panel is
+  now a real editable form, not read-only. Click a node, edit its
+  scalar fields (system fields and REF-typed fields stay read-only —
+  retargeting a relationship is a structural graph change, handled
+  separately), Save writes through `POST /connections/{name}/query/graph/node`
+  (`internal/ui/query.go`), a plain `Client.Patch` on whichever entity
+  the node actually is. Click an edge, retarget it — `POST /connections/{name}/query/graph/edge`
+  patches the *source* entity's own REF field (xolu's graph model
+  derives edges from REF fields, there's no separate relationship
+  object to update), then re-runs the current query, since retargeting
+  genuinely changes the graph's shape. Verified end-to-end with real
+  mouse clicks and direct API fetches confirming the changes actually
+  persisted — a deal's name changed via the form, and a `primary_contact`
+  edge retargeted to a completely different contact at a different
+  company. 9 new Go tests.
+- **DXP presets** — saved, form-driven DXP invocations, distinct from
+  the existing raw-definition picker. A new resolver registry
+  (`internal/ui/dxppreset.go`) turns a couple of simple form fields
+  into a full binding set by looking up related data server-side —
+  `close_deal_won`'s preset asks only for a deal ID and an optional
+  note; `mark_deal_lost`'s asks for a deal ID and a reason. Both
+  derive contact/owner/amount from the deal itself, the same way the
+  CRM seed script's own direct invocations already did. New endpoint:
+  `POST /connections/{name}/dxp/preset-run`. `dxp-editor.js` gained a
+  "Saved presets" section above the existing raw-definition picker.
+  `xoluman_saved_query` extended with a `dxp` mode (`dxp_def_name`/
+  `resolver`/`form_fields`) — `ListSavedQueries`/`CreateSavedQuery`
+  were hardcoded to reject anything but oql/sulpher/rest; fixed. 10
+  new Go tests.
+- **CRM example**: `mark_deal_lost` DXP def added (participants:
+  update the deal, log why, create a follow-up debrief task — a
+  genuine third participant, not padding; xolu's DXP transactions
+  currently only implement the "3ps" pattern, confirmed directly by
+  trying 2ps first and reading the real rejection, XOLU-DXP006), both
+  presets registered as saved queries, plus 3 more OQL and 2 more
+  Sulpher queries.
+  - **Real, corrected understanding of two things initially gotten
+    wrong**, both verified by actually running queries rather than
+    assumed: OQL genuinely does support JOIN (missed real
+    infrastructure — `sqlgen_join.go` plus five dedicated test files —
+    on a first, too-narrow look), but two real bugs block using it
+    against a live tenant today — a `tenant_id` column missing from
+    generated JOIN SQL, and `JOIN` combined with `LIMIT` parsed as two
+    separate statements. Every JOIN-dependent saved query was rewritten
+    as single-table `GROUP BY`, and one genuine anti-join case
+    ("contacts with no logged activity") was dropped entirely, since
+    no rewrite could express it without working JOIN. Separately,
+    Sulpher rejects multiple `MATCH` clauses before a `WITH`
+    (`XOLU-GR004`) — real openCypher's own comma-separated-pattern
+    form works correctly and was used instead. Full writeup of the two
+    JOIN bugs delivered as its own report, not filed as xolu tracking
+    items (not our call to make).
+
+## [0.7.7] — 2026-08-07
+
+- **`examples/crm` relocated from xolu into this repo**, at
+  `examples/crm/` — the launcher, seed script, and README, unchanged
+  in substance. Horacio's own review: the seed script's saved-queries
+  step is genuinely xoluman-specific bookkeeping
+  (`xoluman_saved_query`, an entity type only xoluman itself reads
+  from; one query's own name references xoluman's graph viewer
+  directly), grafted onto what was meant to be a generic, client-
+  agnostic xolu example — and maintaining the same example across two
+  repos risked two slowly-diverging copies of the same thing. Filed
+  and closed as xolu's own T-164 (v0.27.3), which now no longer
+  carries this directory at all.
+  - The launcher's build step previously assumed it ran from inside
+    xolu's own source tree (true only by construction, while it lived
+    in xolu's own `examples/`). Reworked to take an explicit
+    `--xolu-source /path/to/xolu` (or `XOLU_CRM_XOLU_SOURCE`) when
+    building from source, with a clear error — not a cryptic `go
+    build` failure — when neither that nor `--skip-build` (pointing
+    at an already-built binary via `XOLU_CRM_BIN_PATH`) is given.
+  - Verified all three paths end-to-end from the new location: build
+    from an explicit `--xolu-source`, `--skip-build` against an
+    already-built binary, and the missing-both error path.
+  - `.gitignore` updated for the two new runtime-artifact locations
+    this introduces (`/bin/`, `/examples/crm/xolu-crm-data/`).
+
 ## [0.7.6] — 2026-08-06
 
 - **T-22 closed** (see `docs/RESOLVED.md`): backup/export UI. An

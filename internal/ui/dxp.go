@@ -68,10 +68,15 @@ func (h *dxpHandler) View(w http.ResponseWriter, r *http.Request) {
 	}
 
 	basePath := "/connections/" + url.PathEscape(name) + "/dxp"
+	queryBasePath := "/connections/" + url.PathEscape(name) + "/query"
 	body := func(b *mi.Builder) mi.Node {
 		return b.Div(
 			b.H1(mi.Class("text-xl font-semibold text-gray-900 dark:text-white mb-4"), "DXP transactions — "+name),
-			mi.Raw(`<xolu-dxp-editor defs-url="`+htmlEscape(basePath+"/defs")+`" run-url="`+htmlEscape(basePath+"/run")+`"></xolu-dxp-editor>`),
+			mi.Raw(`<xolu-dxp-editor defs-url="`+htmlEscape(basePath+"/defs")+
+				`" run-url="`+htmlEscape(basePath+"/run")+
+				`" presets-url="`+htmlEscape(queryBasePath+"/saved?mode=dxp")+
+				`" preset-run-url="`+htmlEscape(basePath+"/preset-run")+
+				`"></xolu-dxp-editor>`),
 		)
 	}
 	WriteHTML(w, dxpPage("DXP — "+name, r.URL.Path, body))

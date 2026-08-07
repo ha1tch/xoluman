@@ -33,6 +33,13 @@ class XoluDxpEditor extends LitElement {
   static properties = {
     defsUrl: { attribute: 'defs-url' },
     runUrl: { attribute: 'run-url' },
+    // Saved DXP presets — a named def paired with a small, hand-
+    // designed form (see internal/ui/dxppreset.go's own doc comment
+    // on why this isn't a fully generic binding-introspection form).
+    // Fetched from the same xoluman_saved_query storage the query
+    // editor's own saved queries use, filtered to mode=dxp.
+    presetsUrl: { attribute: 'presets-url' },
+    presetRunUrl: { attribute: 'preset-run-url' },
   };
 
   // Light DOM — same reasoning as grid-editor.js/query-editor.js: no
@@ -52,12 +59,75 @@ class XoluDxpEditor extends LitElement {
     this._result = null;
     this._error = null;
     this._loadingDef = false;
+    this._presets = [];
+    this._selectedPreset = null;
+    this._presetFormValues = {};
+    this._runningPreset = false;
+    this._presetResult = null;
+    this._presetError = null;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._fetchDefs();
+    this._fetchPresets();
   }
+
+  async _fetchPresets() {
+    if (!this.presetsUrl) return;
+    try {
+      const resp = await fetch(this.presetsUrl);
+      if (resp.ok) this._presets = await resp.json();
+    } catch (e) {
+      // Best-effort — a failed preset fetch just means the presets
+      // section stays empty; the raw definition picker below it still
+      // works independently.
+    }
+    this.requestUpdate();
+  }
+
+  _selectPreset(nameStr) {
+    const preset = this._presets.find((p) => p.name === nameStr) || null;
+    this._selectedPreset = preset;
+    this._presetResult = null;
+    this._presetError = null;
+    const values = {};
+    for (const f of preset?.form_fields || []) values[f.key] = '';
+    this._presetFormValues = values;
+    this.requestUpdate();
+  }
+
+  async _runPreset() {
+    if (this._runningPreset || !this._selectedPreset) return;
+    this._runningPreset = true;
+    this._presetError = null;
+    this._presetResult = null;
+    this.requestUpdate();
+
+    try {
+      const resp = await fetch(this.presetRunUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resolver: this._selectedPreset.resolver,
+          defName: this._selectedPreset.dxp_def_name,
+          formValues: this._presetFormValues,
+        }),
+      });
+      const text = await resp.text();
+      if (!resp.ok) {
+        this._presetError = text || `HTTP ${resp.status}`;
+      } else {
+        this._presetResult = JSON.parse(text);
+      }
+    } catch (err) {
+      this._presetError = String(err);
+    } finally {
+      this._runningPreset = false;
+      this.requestUpdate();
+    }
+  }
+
 
   async _fetchDefs() {
     try {
@@ -211,8 +281,63 @@ class XoluDxpEditor extends LitElement {
         .dark .xolu-dxp-error { background: rgba(127, 29, 29, 0.3); color: #f87171; }
         .xolu-dxp-empty { color: #6b7280; font-size: 0.875rem; }
         .dark .xolu-dxp-empty { color: #9ca3af; }
+        .xolu-dxp-section-label {
+          font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+          color: #6b7280; margin: 1rem 0 0.5rem;
+        }
+        .dark .xolu-dxp-section-label { color: #9ca3af; }
+        .xolu-dxp-section-label:first-child { margin-top: 0; }
+        .xolu-dxp-preset-desc { font-size: 0.75rem; color: #6b7280; margin: -0.25rem 0 0.75rem; }
+        .dark .xolu-dxp-preset-desc { color: #9ca3af; }
       </style>
 
+      <div class="xolu-dxp-section-label">Saved presets</div>
+      ${this._presets.length === 0
+        ? html`<div class="xolu-dxp-empty">No saved DXP presets on this connection.</div>`
+        : html`
+            <div class="xolu-dxp-picker">
+              <select @change=${(e) => this._selectPreset(e.target.value)}>
+                <option value="">Choose a saved preset…</option>
+                ${this._presets.map((p) => html`<option value=${p.name}>${p.name}</option>`)}
+              </select>
+            </div>
+          `}
+      ${this._selectedPreset
+        ? html`
+            <div class="xolu-dxp-preset-desc">Runs <strong>${this._selectedPreset.dxp_def_name}</strong> — every other binding this transaction needs is looked up automatically from what you enter here.</div>
+            <div class="xolu-dxp-bindings-form">
+              ${(this._selectedPreset.form_fields || []).map(
+                (f) => html`
+                  <div class="xolu-dxp-binding-row">
+                    <label class="xolu-dxp-binding-label">${f.label}</label>
+                    <input
+                      class="xolu-dxp-binding-input"
+                      type="text"
+                      placeholder=${f.placeholder || ''}
+                      .value=${this._presetFormValues[f.key] || ''}
+                      @input=${(e) => (this._presetFormValues = { ...this._presetFormValues, [f.key]: e.target.value })}
+                    />
+                  </div>
+                `
+              )}
+            </div>
+            <button class="xolu-dxp-run-btn" ?disabled=${this._runningPreset} @click=${this._runPreset}>
+              ${this._runningPreset ? 'Running…' : 'Run preset'}
+            </button>
+            ${this._presetError ? html`<div class="xolu-dxp-error">${this._presetError}</div>` : ''}
+            ${this._presetResult
+              ? html`
+                  <div class="xolu-dxp-result ${this._statusClass(this._presetResult.status)}">
+                    <span class="xolu-dxp-status-label">${this._presetResult.status}</span>
+                    ${this._presetResult.reason ? html` — ${this._presetResult.reason}` : ''}
+                    <pre>${JSON.stringify(this._presetResult, null, 2)}</pre>
+                  </div>
+                `
+              : ''}
+          `
+        : ''}
+
+      <div class="xolu-dxp-section-label">Raw definition</div>
       ${this._defs.length === 0
         ? html`<div class="xolu-dxp-empty">No DXP definitions registered on this connection yet.</div>`
         : html`
