@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -255,6 +256,50 @@ func TestQueryHandler_SaveGraphEdge_RetargetsViaPatchOnSourceEntity(t *testing.T
 	}
 }
 
+func TestQueryHandler_SaveGraphEdge_EmptyNewToClearsTheRelationship(t *testing.T) {
+	var gotPath string
+	var gotRaw string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		gotRaw = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":1}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	body, _ := json.Marshal(graphEdgeSaveRequest{
+		From: "tasks:1", RelField: "contact", NewTo: "",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/edge", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.SaveGraphEdge(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if !strings.HasSuffix(gotPath, "/tasks/1") {
+		t.Fatalf("upstream path = %q, want it to patch tasks/1", gotPath)
+	}
+	var gotBody map[string]any
+	if err := json.Unmarshal([]byte(gotRaw), &gotBody); err != nil {
+		t.Fatalf("patched body not valid JSON: %v (%s)", err, gotRaw)
+	}
+	val, present := gotBody["contact"]
+	if !present {
+		t.Fatalf("patched body = %s, want a \"contact\" key present with a null value", gotRaw)
+	}
+	if val != nil {
+		t.Fatalf("contact value = %v, want null (clearing the field, not setting some other value)", val)
+	}
+}
+
 func TestQueryHandler_SaveGraphEdge_MalformedReferenceIsRejected(t *testing.T) {
 	store := seedConnection(t, "http://unused.invalid")
 	h := &queryHandler{store: store}
@@ -304,7 +349,7 @@ func TestParseGraphNodeID(t *testing.T) {
 	}
 }
 
-func TestQueryHandler_Graph_ClassifiesNodesAndEdges(t *testing.T) {
+func TestQueryHandler_GraphSulpherDormant_ClassifiesNodesAndEdges(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
 		// The real shape confirmed directly against a running xolu
@@ -331,7 +376,7 @@ func TestQueryHandler_Graph_ClassifiesNodesAndEdges(t *testing.T) {
 	req.SetPathValue("name", "test")
 	rec := httptest.NewRecorder()
 
-	h.Graph(rec, req)
+	h.graphSulpherDormant(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -351,7 +396,7 @@ func TestQueryHandler_Graph_ClassifiesNodesAndEdges(t *testing.T) {
 	}
 }
 
-func TestQueryHandler_Graph_DeduplicatesNodesAndEdgesAcrossRows(t *testing.T) {
+func TestQueryHandler_GraphSulpherDormant_DeduplicatesNodesAndEdgesAcrossRows(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
 		row := map[string]any{
@@ -377,7 +422,7 @@ func TestQueryHandler_Graph_DeduplicatesNodesAndEdgesAcrossRows(t *testing.T) {
 	req.SetPathValue("name", "test")
 	rec := httptest.NewRecorder()
 
-	h.Graph(rec, req)
+	h.graphSulpherDormant(rec, req)
 
 	var got graphData
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -391,7 +436,7 @@ func TestQueryHandler_Graph_DeduplicatesNodesAndEdgesAcrossRows(t *testing.T) {
 	}
 }
 
-func TestQueryHandler_Graph_SkipsScalarValues(t *testing.T) {
+func TestQueryHandler_GraphSulpherDormant_SkipsScalarValues(t *testing.T) {
 	// A query mixing an aggregate (e.g. COUNT(*)) with a node variable
 	// is valid Sulpher -- the scalar just isn't drawable, and must not
 	// crash the classification pass.
@@ -417,7 +462,7 @@ func TestQueryHandler_Graph_SkipsScalarValues(t *testing.T) {
 	req.SetPathValue("name", "test")
 	rec := httptest.NewRecorder()
 
-	h.Graph(rec, req)
+	h.graphSulpherDormant(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -433,24 +478,268 @@ func TestQueryHandler_Graph_SkipsScalarValues(t *testing.T) {
 
 func TestQueryHandler_Graph_EmptyResultReturnsEmptyArraysNotNull(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed", "result": []map[string]any{}})
+	mux.HandleFunc("GET /api/v1/schema/deals", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "object", "properties": map[string]any{}})
+	})
+	mux.HandleFunc("GET /api/v1/deals", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{}, "pagination": map[string]any{"page": 1, "per_page": 10, "total_items": 0, "total_pages": 1}})
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	store := seedConnection(t, server.URL)
 	h := &queryHandler{store: store}
 
-	reqBody, _ := json.Marshal(queryRunRequest{Query: "MATCH (d:deals) WHERE false RETURN d"})
+	reqBody, _ := json.Marshal(graphRunRequest{EntityType: "deals", Depth: 1})
 	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
 	req.SetPathValue("name", "test")
 	rec := httptest.NewRecorder()
 
 	h.Graph(rec, req)
 
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
 	body := rec.Body.String()
 	if strings.Contains(body, "null") {
 		t.Fatalf("body = %q, want empty arrays not null (the JS side does .map/.forEach on these directly)", body)
+	}
+}
+
+func TestQueryHandler_Graph_DelegatesToRestEmbedGraphRunner(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/deals", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"owner": map[string]any{"type": "object", "format": "ref"}},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/schema/users", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "object", "properties": map[string]any{}})
+	})
+	mux.HandleFunc("GET /api/v1/deals", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "name": "Big Deal", "owner": map[string]any{"type": "REF", "entity": "users", "id": float64(4)}}},
+			"pagination": map[string]any{"page": 1, "per_page": 10, "total_items": 1, "total_pages": 1},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/users/4", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(4), "name": "Alice"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(graphRunRequest{EntityType: "deals", Depth: 1})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got graphData
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if len(got.Nodes) != 2 || len(got.Edges) != 1 {
+		t.Fatalf("got %+v, want 2 nodes (deals:1, users:4) and 1 edge", got)
+	}
+}
+
+func TestQueryHandler_Graph_MissingEntityTypeRejected(t *testing.T) {
+	server := httptest.NewServer(http.NewServeMux())
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(graphRunRequest{})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = %d, want a non-200 for a missing entity type; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestQueryHandler_Graph_MalformedBodyRejected(t *testing.T) {
+	server := httptest.NewServer(http.NewServeMux())
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph", bytes.NewReader([]byte("not json")))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestQueryHandler_Graph_UnknownConnection(t *testing.T) {
+	store := seedConnection(t, "http://unused.invalid")
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(graphRunRequest{EntityType: "deals"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/does-not-exist/query/graph", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "does-not-exist")
+	rec := httptest.NewRecorder()
+
+	h.Graph(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestQueryHandler_GraphEntityTypes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/entities", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entities": []map[string]any{
+				{"entity_type": "deals", "count": float64(25), "has_schema": true},
+				{"entity_type": "companies", "count": float64(12), "has_schema": true},
+			},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/query/graph/entity-types", nil)
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.GraphEntityTypes(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got []string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON array: %v", err)
+	}
+	if len(got) != 2 || got[0] != "deals" || got[1] != "companies" {
+		t.Fatalf("got %+v, want [deals companies]", got)
+	}
+}
+
+func TestQueryHandler_ExpandGraphNode(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/users", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "object", "properties": map[string]any{}})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	mux.HandleFunc("GET /api/v1/users/7", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(7), "name": "Alice"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(graphExpandRequest{Type: "users", ID: 7, Depth: 1})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/expand", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.ExpandGraphNode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got graphData
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	node, ok := nodeByID(got, "users:7")
+	if !ok || node.Collapsed || node.Data["name"] != "Alice" {
+		t.Fatalf("got %+v, want users:7 present, not collapsed, with real data", got)
+	}
+}
+
+func TestQueryHandler_ExpandGraphNode_DefaultsDepthWhenUnset(t *testing.T) {
+	var gotUserFetch bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/users", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"manager": map[string]any{"type": "object", "format": "ref"}},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	mux.HandleFunc("GET /api/v1/users/7", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(7), "manager": map[string]any{"type": "REF", "entity": "users", "id": float64(1)}})
+	})
+	mux.HandleFunc("GET /api/v1/users/1", func(w http.ResponseWriter, r *http.Request) {
+		gotUserFetch = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(1), "name": "Boss"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	// Depth omitted entirely (zero value) -- should still default to a
+	// real depth (1), not "expand nothing beyond the seed itself."
+	reqBody, _ := json.Marshal(graphExpandRequest{Type: "users", ID: 7})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/expand", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.ExpandGraphNode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !gotUserFetch {
+		t.Error("users:1 was never fetched -- depth should have defaulted to at least 1, not 0")
+	}
+}
+
+func TestQueryHandler_ExpandGraphNode_MalformedBodyRejected(t *testing.T) {
+	server := httptest.NewServer(http.NewServeMux())
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/expand", bytes.NewReader([]byte("not json")))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.ExpandGraphNode(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestQueryHandler_ExpandGraphNode_UnknownConnection(t *testing.T) {
+	store := seedConnection(t, "http://unused.invalid")
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(graphExpandRequest{Type: "users", ID: 7})
+	req := httptest.NewRequest(http.MethodPost, "/connections/does-not-exist/query/graph/expand", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "does-not-exist")
+	rec := httptest.NewRecorder()
+
+	h.ExpandGraphNode(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 
@@ -563,6 +852,54 @@ func TestQueryHandler_Run_OQL(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Alice") {
 		t.Fatalf("body missing the query result: %s", rec.Body.String())
 	}
+	var got oqlRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if !got.Classification.IsSimpleSelect || got.Classification.SourceTable != "users" {
+		t.Fatalf("classification = %+v, want a simple select on users for %q", got.Classification, "SELECT * FROM users")
+	}
+	// OQLResult's own fields (embedded by pointer) must still flatten
+	// to the top level, unchanged from before classification existed.
+	if got.OQLResult == nil || got.Status != "ok" || len(got.Data) != 1 {
+		t.Fatalf("OQLResult fields not preserved at top level: %+v", got)
+	}
+}
+
+func TestQueryHandler_Run_OQL_NonSimpleQueryClassifiedCorrectly(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/oql/query", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"data":   []map[string]any{{"name": "Alice", "total": float64(3)}},
+			"stats":  map[string]any{"rows_scanned": 10, "rows_returned": 1},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(queryRunRequest{Mode: "oql", Query: "SELECT name, COUNT(*) AS total FROM users GROUP BY name"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/run", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Run(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got oqlRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if got.Classification.IsSimpleSelect {
+		t.Fatalf("classification = %+v, want IsSimpleSelect=false for an aggregate/GROUP BY query", got.Classification)
+	}
+	if got.OQLResult == nil || len(got.Data) != 1 {
+		t.Fatalf("OQLResult fields not preserved at top level: %+v", got)
+	}
 }
 
 func TestQueryHandler_Run_Sulpher(t *testing.T) {
@@ -601,6 +938,55 @@ func TestQueryHandler_Run_Sulpher(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "nodes_traversed") {
 		t.Fatalf("body missing the query result: %s", rec.Body.String())
+	}
+	var got sulpherRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if got.GraphQueryResult == nil || got.Status != "ok" {
+		t.Fatalf("GraphQueryResult fields not preserved at top level: %+v", got)
+	}
+	if len(got.GraphData.Nodes) != 0 || len(got.GraphData.Edges) != 0 {
+		t.Fatalf("graphData = %+v, want empty for a scalar-shaped result ({\"path\": \"a->b\"} has no _id/from/rel/to markers)", got.GraphData)
+	}
+}
+
+func TestQueryHandler_Run_Sulpher_GraphShapedResultClassified(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/graph/query", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"result": []map[string]any{
+				{
+					"a": map[string]any{"_id": float64(1), "type": "deals", "name": "Big Deal"},
+					"b": map[string]any{"_id": float64(4), "type": "users", "name": "Alice"},
+					"r": map[string]any{"from": "deals:1", "to": "users:4", "rel": "owner"},
+				},
+			},
+			"stats": map[string]any{"nodes_traversed": 2},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	reqBody, _ := json.Marshal(queryRunRequest{Mode: "sulpher", Query: "MATCH (a)-[r]->(b) RETURN a, r, b"})
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/run", bytes.NewReader(reqBody))
+	req.SetPathValue("name", "test")
+	rec := httptest.NewRecorder()
+
+	h.Run(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got sulpherRunResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if len(got.GraphData.Nodes) != 2 || len(got.GraphData.Edges) != 1 {
+		t.Fatalf("graphData = %+v, want 2 nodes and 1 edge classified from the graph-shaped result", got.GraphData)
 	}
 }
 
@@ -730,6 +1116,301 @@ func TestQueryHandler_Run_UnknownConnection(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	h.Run(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestQueryHandler_CreateGraphNode_SchemaFulSuccess(t *testing.T) {
+	var createdBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/widgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			"required":   []string{"name"},
+		})
+	})
+	mux.HandleFunc("POST /api/v1/widgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&createdBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(42), "message": "created"})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	form := url.Values{"name": {"Gadget"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/create/widgets", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "widgets")
+	rec := httptest.NewRecorder()
+
+	h.CreateGraphNode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got createGraphNodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if got.ID != 42 || got.Error != "" {
+		t.Fatalf("got %+v, want ID=42 no error", got)
+	}
+	if createdBody["name"] != "Gadget" {
+		t.Errorf("created body = %+v, want name=Gadget", createdBody)
+	}
+}
+
+func TestQueryHandler_CreateGraphNode_MissingRequiredFieldRejected(t *testing.T) {
+	var createCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/widgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"name": map[string]any{"type": "string"}},
+			"required":   []string{"name"},
+		})
+	})
+	mux.HandleFunc("POST /api/v1/widgets", func(w http.ResponseWriter, r *http.Request) {
+		createCalled = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(1)})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	form := url.Values{"name": {""}} // present but empty -- what a real rendered <input name="name"> actually submits when left blank, not an omitted key
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/create/widgets", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "widgets")
+	rec := httptest.NewRecorder()
+
+	h.CreateGraphNode(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if createCalled {
+		t.Error("c.Create was called despite a client-side validation failure -- should have been rejected before ever reaching the network")
+	}
+	var got createGraphNodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if got.Error == "" {
+		t.Error("expected a non-empty error message")
+	}
+}
+
+func TestQueryHandler_CreateGraphNode_UpstreamCreateFailureSurfaced(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/widgets", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}})
+	})
+	mux.HandleFunc("POST /api/v1/widgets", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "duplicate"}})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	form := url.Values{"name": {"Gadget"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/create/widgets", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "widgets")
+	rec := httptest.NewRecorder()
+
+	h.CreateGraphNode(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+	var got createGraphNodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if got.Error == "" {
+		t.Error("expected the upstream error to be surfaced")
+	}
+}
+
+func TestQueryHandler_CreateGraphNode_RefFieldReconstructed(t *testing.T) {
+	var createdBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/tasks", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"title": map[string]any{"type": "string"},
+				"owner": map[string]any{"type": "object", "format": "ref", "target": "users"},
+			},
+			"required": []string{"title"},
+		})
+	})
+	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&createdBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": float64(9)})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	form := url.Values{"title": {"Follow up"}, "owner": {"4"}}
+	req := httptest.NewRequest(http.MethodPost, "/connections/test/query/graph/create/tasks", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "tasks")
+	rec := httptest.NewRecorder()
+
+	h.CreateGraphNode(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	owner, ok := createdBody["owner"].(map[string]any)
+	if !ok || owner["type"] != "REF" || owner["entity"] != "users" || owner["id"] != float64(4) {
+		t.Fatalf("created owner field = %+v, want a structured REF object -- the same reconstruction the entity form and grid editor already do", createdBody["owner"])
+	}
+}
+
+func TestQueryHandler_CreateGraphNode_UnknownConnection(t *testing.T) {
+	store := seedConnection(t, "http://unused.invalid")
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodPost, "/connections/does-not-exist/query/graph/create/widgets", strings.NewReader(""))
+	req.SetPathValue("name", "does-not-exist")
+	req.SetPathValue("type", "widgets")
+	rec := httptest.NewRecorder()
+
+	h.CreateGraphNode(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestQueryHandler_RefFieldsForType_KnownAndUnknownTargets(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/deals", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":    map[string]any{"type": "string"},
+				"owner":   map[string]any{"type": "object", "format": "ref", "target": "users"},
+				"company": map[string]any{"type": "object", "format": "ref"}, // no declared target
+			},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/query/graph/ref-fields/deals", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "deals")
+	rec := httptest.NewRecorder()
+
+	h.RefFieldsForType(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		Fields    []refFieldInfo `json:"fields"`
+		HasSchema bool           `json:"hasSchema"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if !got.HasSchema {
+		t.Error("HasSchema = false, want true for a real, schema-ful type")
+	}
+	if len(got.Fields) != 2 {
+		t.Fatalf("fields = %+v, want exactly 2 (name is not a REF field, should be excluded)", got.Fields)
+	}
+	byName := map[string]refFieldInfo{}
+	for _, f := range got.Fields {
+		byName[f.Name] = f
+	}
+	if byName["owner"].Target != "users" {
+		t.Errorf("owner target = %q, want users", byName["owner"].Target)
+	}
+	if byName["company"].Target != "" {
+		t.Errorf("company target = %q, want empty (no declared target, none remembered)", byName["company"].Target)
+	}
+}
+
+func TestQueryHandler_RefFieldsForType_SchemaLessTypeReturnsEmptyFields(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/blobs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/query/graph/ref-fields/blobs", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "blobs")
+	rec := httptest.NewRecorder()
+
+	h.RefFieldsForType(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		Fields    []refFieldInfo `json:"fields"`
+		HasSchema bool           `json:"hasSchema"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response not valid JSON: %v", err)
+	}
+	if got.HasSchema {
+		t.Error("HasSchema = true, want false for a genuinely schema-less type")
+	}
+	if len(got.Fields) != 0 {
+		t.Fatalf("fields = %+v, want empty for a schema-less type", got.Fields)
+	}
+}
+
+func TestQueryHandler_RefFieldsForType_UnknownConnection(t *testing.T) {
+	store := seedConnection(t, "http://unused.invalid")
+	h := &queryHandler{store: store}
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/does-not-exist/query/graph/ref-fields/deals", nil)
+	req.SetPathValue("name", "does-not-exist")
+	req.SetPathValue("type", "deals")
+	rec := httptest.NewRecorder()
+
+	h.RefFieldsForType(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)

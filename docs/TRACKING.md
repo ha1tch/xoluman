@@ -1,4 +1,4 @@
-Version: 0.7.9
+Version: 0.7.32
 Last reviewed: 2026-08-03
 
 # xoluman — Live Register
@@ -12,6 +12,10 @@ limits and recorded decisions rather than open work.
 | ID | Summary | Theme | Priority | Status | Blocks/after |
 |----|---------|-------|----------|--------|---------------|
 | T-04 | Implement `ConnectionStore` keyring backend | connstore | P1 | ◐ | After: T-06 (closed, v0.1.0) |
+| T-26 | Settings-page UI for SeedsDir and the two seed safety switches | seeds | P2 | ☐ | — |
+| T-27 | CRM example seed data reshaped into the current seed-package format | seeds | P3 | ☐ | — |
+| T-28 | Navigation link to the Seeds pages from the main connections UI | seeds | P2 | ☐ | — |
+| T-29 | Test the full Sulpher-to-graph path against a live server with CAL/DXP primitives present | seeds | P2 | ☐ | — |
 
 ## Detail
 
@@ -51,4 +55,30 @@ yet. See the dormant-guard entry in `KNOWN_ISSUES.md` for the exact
 invocation. T-04 closes once that's run and reported.
 
 ## query-editor
+
+## seeds
+
+### T-26. Settings-page UI for SeedsDir and the two seed safety switches
+
+Theme: seeds · Priority: P2 · Status: ☐
+
+Currently only configurable by hand-editing settings.json (SeedsDir, SeedSkipEmptyCheck, SeedAllowRemoteSources). A real settings page for these was flagged as still-ahead work when the seed system HTTP layer shipped (v0.7.28) and never built.
+
+### T-27. CRM example seed data reshaped into the current seed-package format
+
+Theme: seeds · Priority: P3 · Status: ☐
+
+The CRM example predates the seed system (built as ad hoc setup scripts). Reshaping it into a real seed.json package would give the seed browse/preview/apply flow a genuine, non-trivial worked example, not just the minimal hello-fsm demo.
+
+### T-28. Navigation link to the Seeds pages from the main connections UI
+
+Theme: seeds · Priority: P2 · Status: ☐
+
+The seed browse/preview/apply pages are fully functional but reachable only by direct URL — nothing in the main connection view links to them. A real person exploring a connection in the UI has no way to discover the feature exists.
+
+### T-29. Test the full Sulpher-to-graph path against a live server with CAL/DXP primitives present
+
+Theme: seeds · Priority: P2 · Status: ☐
+
+The Sulpher/graph reorganization (v0.7.23) and graphData plumbing were verified structurally and via mocked tests, but the full path — a real Sulpher query against a live server returning graph-shaped data through CAL/DXP primitives, rendered in the graph viewer — has never been exercised end to end.
 

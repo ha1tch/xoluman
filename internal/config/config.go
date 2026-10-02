@@ -39,13 +39,46 @@ func (b SecretBackend) Valid() bool {
 // <Dir()>/settings.json.
 type Settings struct {
 	SecretBackend SecretBackend `json:"secret_backend"`
+	// SeedsDir is the local directory xoluman scans for seed packages
+	// (internal/seeds.Discover). Empty means "none configured" — the
+	// browse UI shows no local seeds rather than erroring, matching
+	// Discover's own treatment of a directory that doesn't exist yet.
+	SeedsDir string `json:"seeds_dir,omitempty"`
+	// SeedSkipEmptyCheck opts OUT of the seed system's own safety
+	// precondition (internal/seedapply.CheckEmpty) — when false (the
+	// default, and the zero value), a seed is refused entirely unless
+	// the target connection is confirmed to have no data at all, not
+	// just no data of the entity types the seed itself touches.
+	// Deliberately named and oriented so the safe behavior is the
+	// zero value: a settings.json written before this field existed
+	// decodes it as false (checked, safe) automatically, never as an
+	// accidental opt-out — the opposite polarity (a
+	// "RequireEmptyConnection" field defaulting true) would silently
+	// decode to false — unsafe — for exactly that case, since JSON
+	// unmarshal leaves an absent field at its type's zero value, not
+	// at whatever DefaultSettings would have produced.
+	SeedSkipEmptyCheck bool `json:"seed_skip_empty_check,omitempty"`
+	// SeedAllowRemoteSources enables fetching seed packages from a
+	// remote GitHub source (ha1tch/xoluseeds) in addition to the
+	// local SeedsDir. Off by default, deliberately — xoluman's own
+	// stated design principle is no live internet dependency at
+	// runtime (see web/static/vendor/VENDOR.md), since it manages
+	// xolu instances that may themselves be air-gapped; this is the
+	// one, explicit, opt-in exception, never on without the person
+	// choosing it.
+	SeedAllowRemoteSources bool `json:"seed_allow_remote_sources"`
 }
 
 // DefaultSettings returns the settings xoluman starts with before any
 // settings.json exists — SecretBackendFile, since it works everywhere
-// with no external dependency.
+// with no external dependency. SeedSkipEmptyCheck and
+// SeedAllowRemoteSources are both left at their zero value (false),
+// which is already each one's own safe default — see each field's
+// own doc comment for why that polarity was chosen deliberately.
 func DefaultSettings() Settings {
-	return Settings{SecretBackend: SecretBackendFile}
+	return Settings{
+		SecretBackend: SecretBackendFile,
+	}
 }
 
 // Dir returns xoluman's configuration directory, creating it if absent.

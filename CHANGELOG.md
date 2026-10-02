@@ -2,6 +2,993 @@
 
 All notable changes to xoluman are recorded here.
 
+## [0.7.32] — 2026-08-19
+
+FSM export — SVG, PNG, and LaTeX/TikZ — reusing `fsm-toolkit`'s own
+exporters rather than xoluman inventing anything: the unreused
+capability flagged directly, and the gap that motivated porting
+LaTeX/TikZ to Go in the first place, now actually wired in.
+
+- **`fsm-toolkit` bumped to v0.10.0** (from v0.9.6, via a local
+  replace directive — that version isn't published anywhere yet),
+  bringing `pkg/latex` into scope alongside the `pkg/fsmfile` SVG/PNG
+  exporters xoluman's `fsmdef.go` already had access to but never
+  called.
+- **Three new routes**: `GET .../fsm/{id}/export/{svg,png,latex}`.
+  All three share the existing `fsmToolkitFSM` conversion bridge
+  (already used for local validation) rather than duplicating it.
+- **One deliberate, stated difference between formats, not papered
+  over**: SVG and PNG run `fsm-toolkit`'s own `SmartLayout`
+  internally and always have — a fresh auto-layout every export.
+  LaTeX runs no layout of its own by design (see `pkg/latex`'s own
+  package doc comment) — it renders the actual arrangement saved via
+  the existing `SaveLayout` mechanism. A machine with no saved layout
+  yet gets a clear, actionable error for the LaTeX path specifically,
+  not a fabricated position set that wouldn't match what's on screen.
+- **`fsm-editor.js`'s own toolbar already had SVG / PNG / TeX export
+  buttons wired to a `_exportBaseUrl` getter derived from `layoutUrl`**
+  — found already present and already correctly pointing at these
+  exact route paths when this file was checked, not written in this
+  pass. Confirmed the derivation is genuinely correct against the real
+  server-rendered `layout-url` attribute rather than assumed.
+- **Two real integration bugs found and fixed by actually running the
+  tests, not caught by review**: `RenderPNG` needs real width/height
+  — a zero-value `PNGOptions{}` produces `invalid image size: 0x0`;
+  fixed to use `fsm-toolkit`'s own `DefaultSVGOptions()`/
+  `DefaultPNGOptions()`, which already existed and should have been
+  used from the start. Separately, a test's own mock of the
+  `xoluman_fsm_layout` list response used a guessed shape
+  (`{"entities": [...]}`) instead of the real one
+  (`{"data": [...], "pagination": {...}}`) — caught by reading
+  `xolu`'s own `Client.List` implementation directly rather than
+  continuing to guess.
+- **Verified live, end to end**, not only via unit tests: a real FSM
+  created and a real layout saved through xoluman's own actual HTTP
+  API, then all three export endpoints hit for real. SVG and PNG
+  visually confirmed correct (PNG's auto-layout genuinely
+  auto-derived, distinct green initial-state styling from
+  `fsm-toolkit` itself). The LaTeX output was compiled with `pdflatex`
+  for real and the resulting diagram visually confirmed to match the
+  *exact* saved coordinates, not an auto-derived approximation of
+  them — the specific distinction this format exists to preserve.
+
+## [0.7.31] — 2026-08-19
+
+The xolu team delivered on every gap flagged in the seed-system
+requirements report — verified independently before anything here
+was built on top of it, not accepted on the strength of their own
+changelog.
+
+- **`xolu` dependency bumped to v0.30.34** (from v0.30.14). Before
+  touching xoluman's own code, every claim was checked directly: the
+  real route table for `obj`'s new `GET /obj/list` and all 12 typed
+  client methods, `loc`'s full 21-method coverage including fences
+  and patterns, `ts`'s buildout from 7 to 31 routes, and the two
+  specific fixes called out in their changelog (`LocPatchRequest`'s
+  double-pointer tri-state semantics; `obj`'s `TxnID`/
+  `CommittedThrough` as `int64`/`int`, not `string`) — all confirmed
+  exactly as described by reading the actual source, not the prose
+  describing it.
+- **`internal/seedapply.CheckEmpty` rewritten around the new,
+  single-round-trip `Client.TenantSummary`**, replacing the previous
+  eight-primitive, multiple-round-trip implementation entirely. This
+  closes the one permanent gap that implementation could never
+  actually close on its own — `obj` had no enumeration endpoint
+  anywhere in xolu's own server, confirmed directly at the time, so
+  no client-side workaround could ever make it checkable — and adds
+  `blob` coverage that the earlier implementation had simply never
+  attempted at all, a real gap in xoluman's own prior coverage, not
+  only xolu's. `FindingUncheckable` is gone; every group is now a
+  real, working check.
+- **Verified live, end to end, through the real HTTP API**, not just
+  unit tests: registered a connection against a freshly-launched
+  `xolu` v0.30.34 server, applied a real seed against a genuinely
+  empty tenant (correctly allowed, FSM genuinely created), then
+  applied again against the now-populated tenant — correctly blocked,
+  with an accurate breakdown naming exactly what was found
+  (`primary: [fsm_definitions:1 fsm_id_seq:1]`, every other group
+  correctly reported empty).
+- **One stale test caught and fixed along the way**: a test asserting
+  the blocked-on-non-empty path mocked the old, now-unused
+  `/api/v1/entities` route directly. With no `/tenant-summary` route
+  in that same mock, the new `CheckEmpty` would have 404'd and still
+  reported blocked — passing, but for an unrelated reason (a failed
+  check, not genuine data detection) rather than the one it claimed
+  to test. Fixed to mock the real endpoint with genuine non-empty
+  data, so the test verifies what it says it verifies.
+- No UI or wire-format changes needed: `EmptinessResult`'s own
+  `Findings []Finding` shape is unchanged, and the preview page's own
+  JS already renders it generically — only `CheckEmpty`'s internal
+  implementation changed.
+
+## [0.7.30] — 2026-08-15
+
+Switched the remote seed source from `.tar.gz` to `.zip`, per direct
+feedback — no good argument survived being actually checked for
+keeping `.tar.gz`.
+
+- **The rate-limit argument doesn't favor either format.**
+  `codeload.github.com` serves `.zip` as an equally single request,
+  same as `.tar.gz` — the reason tar.gz was chosen in the first place
+  (avoiding the GitHub REST API's per-directory calls burning through
+  its unauthenticated 60/hour limit) applies just as well to `.zip`.
+  `.zip`'s own simpler, non-nested container — no separate compression
+  layer wrapping the archive structure, unlike gzip wrapping tar — was
+  preferred once that was checked rather than defended reflexively.
+- **`internal/seedsremote.Sync` rewritten around `archive/zip`.**
+  `DefaultZipURL` replaces `DefaultTarballURL`
+  (`codeload.github.com/ha1tch/xoluseeds/zip/refs/heads/main`). One
+  real, honestly-stated tradeoff: `archive/zip` needs random access
+  (its central directory sits at the end of the file), so the whole
+  response is read into memory before extraction, rather than streamed
+  entry-by-entry the way a tar stream allowed — a real cost only for
+  archives too large to comfortably buffer, and seed packages (schemas,
+  JSONL, small preview images) aren't that.
+- Wrapper-directory stripping and the tar-path-traversal defense both
+  carry over unchanged in spirit — same "zip slip"-class protection,
+  now checking each zip entry's own resolved path instead of each tar
+  header's.
+- All 6 `seedsremote` tests and the `internal/ui` remote-source tests
+  rewritten to build real, in-memory `.zip` fixtures instead of
+  `.tar.gz` ones — same coverage (extraction, empty-repo handling,
+  path-traversal rejection, stale-cache clearing, HTTP/format-error
+  propagation), same assertions, different container format.
+- **Re-verified live against the real repository** after the switch:
+  the `.zip` endpoint extracts the exact same real content (`LICENSE`,
+  `README.md`) the `.tar.gz` version did, and `Discover` again
+  correctly reads it as zero seeds, not a failure.
+
+## [0.7.29] — 2026-08-15
+
+The remote seed source: `ha1tch/xoluseeds`, now real and public
+(currently empty, per its own owner), wired end to end — checked, and
+re-checked, against the actual live repository, not just mocked
+fixtures.
+
+- **New `internal/seedsremote` package.** `Sync` fetches the repo's
+  own tarball (`codeload.github.com`, one request regardless of how
+  many seed packages exist — deliberately not the GitHub REST API's
+  own per-directory contents calls, which would burn through its
+  unauthenticated 60/hour rate limit after a handful of seeds, and
+  would turn "one check" into an unbounded request count as the repo
+  grows) and extracts it into a local cache directory, stripping
+  GitHub's own top-level wrapper directory so the result lands exactly
+  where `internal/seeds.Discover` already expects it — no separate
+  "remote seed" data model exists anywhere; a synced remote seed is
+  discovered, loaded, previewed, and applied through precisely the
+  same code path as a local one.
+- **Tar path-traversal safety treated as a real concern, not
+  theoretical** — a tarball is untrusted input the moment it comes
+  from a network fetch. Every extracted entry's resolved path is
+  confirmed to stay within the cache directory before being written;
+  a deliberately malicious tar entry (`../../../etc/evil.json`) is
+  rejected outright, confirmed with a dedicated test that also checks
+  the file was never actually written anywhere on disk, not just that
+  an error came back.
+- **Wired into `Browse` and a new manual-retry endpoint
+  (`POST .../seeds/sync-remote`)**, matching the agreed design
+  exactly: one sync attempt per page load when the setting is on, zero
+  network access at all when it's off (confirmed with a test pointed
+  at a guaranteed-unreachable address), and retrying is *only* ever
+  the person clicking the retry button this renders on failure — no
+  background polling, no automatic retry, anywhere.
+- Local and remote seeds are shown, and addressed, separately — a
+  `remote-` id prefix in the URL disambiguates a remote seed from a
+  local one that happens to share the same author-chosen id, resolved
+  in `findSeed` without ever triggering a new sync of its own (sync
+  only ever happens from `Browse` or the explicit retry).
+- 13 new tests across both packages (tarball extraction, the empty-repo
+  case, path-traversal rejection, stale-cache clearing between syncs,
+  HTTP/gzip error propagation, the disabled-setting no-network-access
+  guarantee, remote-id resolution, and the retry endpoint's own refusal
+  when the setting is off).
+- **Verified live, twice**: a hand-built local check confirming `Sync`
+  against the real repository extracts exactly its real current
+  content (`LICENSE`, `README.md`) and that `Discover` correctly reads
+  this as zero seeds, not a failure; then the full browser-driven
+  flow — Browse page, real network round trip to
+  `codeload.github.com`, "No seeds available yet" rendered cleanly,
+  zero console errors.
+
+## [0.7.28] — 2026-08-15
+
+The seed system's HTTP layer and settings — browse, preview, apply,
+and roll back a seed against a connected tenant, reachable through
+real routes for the first time. Two real bugs found only by running
+the whole thing live against a real xolu server, not just the mocked
+unit tests — recorded in full since both are worth remembering.
+
+- **New settings in `internal/config`**: `SeedsDir`,
+  `SeedSkipEmptyCheck`, `SeedAllowRemoteSources`. Both booleans are
+  deliberately oriented so their zero value is the safe one — a
+  `settings.json` written before these fields existed decodes to
+  "check runs, remote sources off" automatically, never to an
+  accidental opt-out. A `RequireEmptyConnection: true`-by-default
+  field would have failed exactly this case, silently, since JSON
+  unmarshal leaves an absent field at its zero value, not at whatever
+  `DefaultSettings` would have produced — proved with a dedicated test
+  that decodes a genuinely pre-existing settings file and asserts both
+  fields land safe.
+- **New `internal/ui/seeds.go`**: browse (list local seeds), preview
+  (manual, image gallery, a computed step-count summary), apply
+  (gated by the emptiness check unless explicitly skipped), and
+  rollback — registered as a real module alongside every other one.
+  Preview images served via `http.FileServer`/`http.Dir`, so
+  path-traversal safety comes from Go's own established mechanism, not
+  hand-rolled.
+- **Bug 1, `FailedAtStep` silently dropped on the wire.** `omitempty`
+  on an `int` field where 0 is a real, meaningful value (the first
+  step) — Go's JSON encoding treats the zero value as absent and omits
+  the key entirely. A failure at step 0 showed up in the browser as
+  "Failed at step *undefined*." Fixed by removing `omitempty` from
+  this one field specifically.
+- **Bug 2, the more interesting one: `Rollback`'s own report types had
+  no JSON tags at all.** They serialized with Go's default,
+  capitalized field names (`"Removed"`, `"NotDeletable"`) while the
+  UI's own JS read lowercase/camelCase (`data.removed`), so every
+  rollback silently reported "Removed 0 item(s)" regardless of what
+  actually happened — confirmed via a raw `curl` call that the backend
+  itself was correct throughout (the real server showed the item
+  genuinely removed) while the browser display was wrong the entire
+  time. A second, related gap in the same area: `RollbackFailure.Err`
+  is a Go `error`, which has no exported fields at all — the default
+  encoding would have silently produced `{}`, losing any real failure
+  message on the wire. Fixed with proper `json:"camelCase"` tags plus
+  a custom `MarshalJSON` on `RollbackFailure` that surfaces
+  `Err.Error()` as a real string field. Three new tests assert the
+  actual serialized JSON keys directly — the exact gap that let both
+  bugs through undetected until a live run caught them.
+- **Verified against a real xolu server, twice over, after each fix**:
+  a real seed applied successfully (an FSM genuinely created,
+  confirmed via a direct API call, not just a UI success message);
+  and a deliberately-failing two-step seed, rolled back, confirmed
+  genuinely removed on the real server afterward — both runs with zero
+  browser console errors.
+
+## [0.7.27] — 2026-08-15
+
+The seed system's safety precondition: `CheckEmpty` in
+`internal/seedapply`, confirming a connection has no data at all
+before a seed is ever allowed to apply (per the agreed default: the
+switch is on unless explicitly turned off, and when it's on, nothing
+gets written unless the tenant is perfectly empty).
+
+- **Checks across every primitive with a real way to check**:
+  entities (`ListEntities`, any type with `Count > 0` fails it), FSM
+  defs, DXP defs, `bal` accounts, `cal` calendars, `ts` timelines (all
+  via their own real, typed `List` methods), and `loc` (no typed
+  client method exists, so via `Client.Raw` against the real `GET
+  /loc/list` route — confirmed directly against
+  `v2_loc_handlers.go`'s own route table and response shape, not
+  guessed).
+- **`obj` is permanently uncheckable, stated outright rather than
+  worked around.** Checked xolu's real `v2_obj_handlers.go` directly:
+  every registered route is a per-id lookup (get, move, report,
+  position, contents) — no enumeration endpoint exists anywhere in the
+  route table. A real design tension followed from this: requiring
+  every primitive to be *confirmed* empty would mean the safety switch
+  could never pass for any connection, ever, which would make the
+  switch block the feature entirely rather than serve it. Resolved by
+  giving `obj` its own status, `FindingUncheckable`, which — alone
+  among the failure statuses — does not by itself make the overall
+  result non-empty, but is always included in the report, never
+  silently dropped, so the gap in the "perfectly empty" guarantee is
+  visible to whoever is deciding whether to proceed, not hidden from
+  them.
+- A genuine failed check (a check that errors, times out, or returns
+  something unexpected) is treated the same as "has data" for the
+  overall verdict — "couldn't verify" is deliberately never conflated
+  with "confirmed empty."
+- Two real path mistakes caught by running the tests against a real
+  mock server, not assumed correct from the method names alone: `ts`'s
+  real list route is `/ts/tl/list`, not the more obvious-sounding
+  guess this started with; and this session's own test mux needed
+  restructuring after Go 1.22+'s `ServeMux` turned out to panic on
+  registering the same route pattern twice, which the first draft's
+  override style did without noticing.
+- 7 new tests (all-empty, each primitive individually reporting real
+  data, a failed check, and two tests asserting the `obj` design
+  decision explicitly by name, not just incidentally). Full suite,
+  both new packages plus everything existing, clean.
+
+## [0.7.26] — 2026-08-15
+
+The seed system's executor: `internal/seedapply`, everything needed
+to actually run a loaded seed against a real, connected tenant.
+
+- **Two-phase `Apply`.** Phase one runs every step in manifest order —
+  each of the nine step kinds decodes straight into its own real
+  `xclient` request type and calls the real method (`schema` →
+  `DefineEntitySchema`, `data` → `Create` per row with REF fields
+  deferred, `fsm` → `CreateMachineDef`, `dxp_def` → `DxpDefCreate`,
+  `bal_define`/`bal_transfer` → `BalDefine`/`BalTransfer`,
+  `cal_create_calendar`/`cal_propose` → `CalCreateCalendar`/
+  `CalPropose`, `raw` → `Raw`). Phase two patches every deferred `$ref`
+  field back in, once every seed-local key in the *whole* seed has a
+  real target — order never matters, forward references across steps
+  confirmed working directly, not assumed.
+- **`Rollback`, honest about its own real limits.** Checked `xolu`'s
+  public client directly for delete/cancel/remove methods before
+  writing this: only entities and FSM definitions can ever be removed
+  through it. Nothing exists for DXP defs, `bal` accounts/transfers,
+  or `cal` calendars/bookings — confirmed by absence, not assumed from
+  "probably immutable." `Rollback` never pretends otherwise: those
+  kinds are reported in `NotDeletable`, never attempted. This is the
+  concrete reason the seed system's own empty-connection precondition
+  (agreed several turns ago) matters as much as it does — for the
+  non-deletable kinds, refusing to start against a non-empty tenant is
+  the *only* real safety net that exists.
+- **Two real bugs caught by actually running the tests against a real
+  mock server**, not assumed away: the schema-registration mock route
+  was missing xolu's real `/api/v1` prefix (`buildURLRoot`'s own
+  construction, checked directly); a DXP-def test fixture was
+  genuinely invalid per `xolu`'s own client-side validation (empty
+  `participants`, then a missing `phase_ttl.reserve`) — both traced to
+  the real cause and fixed, not patched around.
+- **A format clarification this work surfaced**: `Client.Raw` does no
+  path prefixing at all (confirmed against its real implementation —
+  a bare `baseURL + path` concatenation), so a `raw` step's own `path`
+  must be the complete, absolute path, not a short suffix. Documented
+  directly on `seeds.Step`'s own field.
+- 17 new tests (every step kind in one full-manifest run, cross-step
+  forward-reference resolution, mid-run failure with `Created`
+  correctly populated up to the failure point for `Rollback`'s own
+  input, an undefined-`$ref`-key failure, a vanished-file failure) —
+  all passing, full existing suite unaffected.
+
+## [0.7.25] — 2026-08-15
+
+First real implementation piece of the seed system: the manifest
+format itself, built and tested in isolation before anything else
+depends on it, same pattern as `oqlclassify`.
+
+- **New `internal/seeds` package.** `Manifest`/`Step` types plus a
+  pure, filesystem-free `ParseManifest` — deliberately: unit-testable
+  without a real directory on disk, filesystem/existence checks are a
+  separate, later concern (`Load`, not yet built).
+- **Nine step kinds**, five typed and four not, matching exactly what
+  was confirmed against xolu's real source in the requirements report:
+  `schema`, `data`, `fsm`, `dxp_def`, `bal_define`, `bal_transfer`,
+  `cal_create_calendar`, `cal_propose` (typed — each will decode
+  straight into `xolu`'s own real client request struct once the
+  executor exists) and `raw` (a plain `{method, path, file}`
+  passthrough — the only route available today for `loc`/`obj`/`ts`,
+  all three confirmed to have real, working REST endpoints despite no
+  client-library wrapper; `ts` specifically via `POST
+  .../ts/events/batch`, exact field shape confirmed against the real,
+  unexported server handler type).
+- Structural validation at parse time, not deferred to the executor:
+  unknown `format_version`, unknown step type, missing `id`/`name`,
+  zero steps, missing `file`, `schema`/`data` steps missing
+  `entity_type`, `raw` steps missing `method`/`path` — all rejected
+  immediately with an error naming the manifest's own id, not
+  discovered later as a confusing runtime failure.
+- 16 tests, one per validation rule plus the full/minimal valid-shape
+  cases, all passing on the first run. Full existing suite unaffected.
+
+## [0.7.24] — 2026-08-15
+
+- **Added `github.com/ha1tch/queryfy@v0.3.2`** as a direct dependency
+  — the newest release, not just matching whatever version `xolu`
+  itself happens to depend on transitively (`v0.3.1`, confirmed by
+  checking `xolu`'s own `go.mod` directly). Landed as `// indirect`
+  in `go.mod`, correctly: nothing in `xoluman`'s own code imports it
+  yet, so Go's own tooling is being honest about that rather than
+  claiming a use that doesn't exist — the marker will drop on its own
+  the moment real code does, most likely the seed-format validation
+  work discussed but not yet built. Full build, vet, and test suite
+  confirmed clean with the addition in place.
+
+## [0.7.23] — 2026-08-15
+
+Completes the query/graph view reorganization design: Sulpher moves
+out of the Query view into a new tab beside the graph walker, with a
+"View in graph" bridge for graph-shaped results. The Query view keeps
+just OQL and REST.
+
+- **`classifySulpherResult` extracted** from the dormant standalone
+  endpoint into a shared, reused function — confirmed the extraction
+  changed nothing (the existing dormant tests still pass unchanged).
+  `Run`'s own `sulpher` case now returns the same classified
+  `{nodes, edges}` alongside the raw result (`sulpherRunResponse`,
+  mirroring `oqlRunResponse`'s own embedding pattern), so the Sulpher
+  tab can offer "View in graph" without a second round trip.
+- **`query-editor.js` gained a `modes` attribute** restricting which
+  tabs an instance shows — `oql,rest` on the Query page, `sulpher`
+  alone on the Graph page. The tab switcher itself is hidden entirely
+  when only one mode is active. A new `_viewInGraph()` dispatches a
+  bubbling custom event carrying the classified graph data;
+  `fsm-editor.js` gained a public `applyExternalGraphData()` entry
+  point as the receiving end.
+- **New combined `graphPage()`** wrapper loading both script sets
+  (fsm-canvas-engine.js + fsm-editor.js, codemirror-bundle +
+  query-editor.js) and a small page-level tab controller mediating
+  between the two sibling components — neither needs to know the
+  other exists. Graph view is the default, initially-visible tab
+  deliberately: `fsm-editor.js`'s own initial sizing reads the
+  canvas-wrap's real bounding box at connect time, which would see
+  0×0 if that panel started hidden; `query-editor.js` has no
+  equivalent concern, so Sulpher starting hidden is safe the other
+  way around.
+- **Found and root-caused a real bug in the Cypher editor
+  integration**, not previously exercised by a real run-and-render
+  cycle: any Sulpher query threw `newContentVersion is not a
+  function` from a debounced lint timer — confirmed this fired from
+  typing alone, with no Run click at all, ruling out anything specific
+  to this turn's own changes. Traced through the actual, unminified
+  `@neo4j-cypher/codemirror@1.0.3` source (installed and read
+  directly, not guessed from the minified vendored bundle) to the real
+  cause: the package's own lower-level `getExtensions()` API — what
+  `query-editor.js` uses, for the same `Compartment`-based
+  reconfiguration OQL/REST already need — never attaches
+  `newContentVersion` to the `EditorView` itself; only the package's
+  separate, higher-level `createCypherEditor()` helper does that,
+  as a manually-attached version-counter closure. Fixed by completing
+  that same attachment directly in `query-editor.js`, matching the
+  package's own internal implementation exactly — no bundle rebuild,
+  no feature loss (linting and autocomplete both still fully work).
+- Verified end to end against real, live CRM data throughout: the new
+  tab structure, a real Sulpher query with zero errors through typing,
+  waiting, and running, the full bridge to the graph view (4 real
+  nodes, all 4 correct entity types), and confirmed both the
+  OQL/REST-only Query page and FSM-mode pages are genuinely unaffected
+  by any of this turn's changes.
+
+## [0.7.22] — 2026-08-14
+
+Two graph-editor UX fixes, requested directly: a full-screen toggle,
+and moving the inspect panel from below the canvas to a right sidebar
+(a preference from an earlier session that the actual layout hadn't
+matched — the panel was rendering as a sibling `<div>` below the
+canvas-wrap, not beside it, since the outer container is a
+`flex-direction: column` layout and nothing had ever put the two side
+by side).
+
+- **Right sidebar for graph mode's inspect panel.** New
+  `.fsm-graph-body` row-flex wrapper (canvas + a fixed-width, 320px
+  `.fsm-graph-sidebar`) used only in graph mode — FSM mode's own
+  layout (validation panel below the canvas) is untouched, confirmed
+  directly rather than assumed: canvas stays full-width, no sidebar
+  element present at all. Confirmed against real, live data with an
+  actually-populated inspect panel, not just the empty "click a node"
+  hint state, since that hint text lacked the `.fsm-panel` class the
+  first draft of this fix would have relied on.
+- **Full-screen toggle**, a new `⛶` button beside the existing zoom
+  controls. Deliberately a CSS-only `position: fixed` overlay covering
+  the viewport rather than the real browser Fullscreen API — avoids
+  the permission prompt, the "press Esc to exit" browser chrome, and
+  needing to listen for `fullscreenchange` separately to keep state in
+  sync; toggling back is just flipping the same reactive property.
+  Re-fits the view when toggled (`zoomToFit`, after waiting for the
+  actual resize to complete) — the existing `ResizeObserver`-driven
+  resize already correctly grows the canvas buffer, but never
+  auto-refits on its own, which is right for an ordinary window resize
+  but wrong here: full screen exists to see more of the graph, not
+  more empty canvas at the same zoom level. Available in both graph
+  and FSM mode, not scoped narrowly — the same convenience applies
+  equally well to FSM editing, confirmed present in both. Verified
+  against real, live data: canvas genuinely grows on maximize and
+  restores to its exact original size on exit.
+
+## [0.7.21] — 2026-08-14
+
+Wires the OQL classifier (v0.7.20) into the actual query view — the
+second piece of the query/graph reorganization design. REST stays
+untouched (no table-view routing at all, per this design's own
+correction: REST is a raw passthrough, not meant to simulate OQL).
+
+- **`Run`'s OQL response now carries classification.** `oqlRunResponse`
+  embeds `*xclient.OQLResult` by pointer so `status`/`data`/`stats`
+  keep flattening to the top level exactly as before this change —
+  nothing that already read the old shape needs to change — plus a
+  new `classification: {isSimpleSelect, sourceTable}` field, computed
+  via `oqlclassify.Classify` against the actual query text. A query
+  the classifier itself can't parse degrades to `isSimpleSelect:
+  false` rather than failing the whole request — the real OQL result
+  a person asked for is never blocked by a gap in this session's own
+  classifier.
+- **New UI in `query-editor.js`, OQL mode only:** a generic "View as
+  table" toggle for any result whose own `data` is a non-empty array
+  (client-side, built directly from the rows already in hand — no new
+  endpoint needed), and, only when the classifier confirms a genuine
+  simple select, a second link straight to the real, existing,
+  already-live-editable entity list page for that table
+  (`/connections/{name}/entities/{table}`) — not a new editable view
+  built for this feature, the one that was already there.
+- Verified end to end against real, live CRM data: `SELECT * FROM
+  companies` correctly shows both the toggle and the link (link
+  pointing at the real entities page, toggle rendering a genuine
+  9-column, 15-row table); `SELECT name, industry FROM companies`
+  correctly shows the toggle alone, no link; REST mode shows neither,
+  confirmed directly rather than assumed from the `this._mode ===
+  'oql'` guard alone; Sulpher mode confirmed still present and
+  unaffected.
+- One test-script mistake caught and fixed along the way, not an
+  application bug: an initial verification script assumed the mode
+  tabs were `<button>` elements: they're plain `<div class="xolu-
+  query-tab">`s, confirmed directly against the actual render output
+  before fixing the selector.
+
+## [0.7.20] — 2026-08-14
+
+First piece of the query/graph view reorganization design (Sulpher
+moving into the graph view as its own tab; OQL results routing to
+either the existing live-editable entity grid or a new read-only
+table view, depending on query shape) — built and tested in isolation
+first, since it's the part carrying the most real risk.
+
+- **New `internal/oqlclassify` package.** Determines whether an OQL
+  query is a "simple select" — `SELECT * FROM <one table>`, nothing
+  else — the one shape where every returned row is, one-to-one, a
+  complete and unmodified document of a real entity, safe to route
+  into the existing entity grid for live editing. Every other shape
+  (an explicit field list even if it happens to name every field, a
+  JOIN, an aggregate, `GROUP BY`, `UNION`, `DISTINCT`, `SELECT INTO`,
+  a subquery in `FROM`) is correctly rejected — confirmed against
+  `tsqlparser`'s own real, parsed AST rather than text matching,
+  which would have gotten real OQL syntax wrong somewhere (comments,
+  bracketed identifiers, whitespace) for a decision where a false
+  positive is the one failure mode that actually matters (routing an
+  uneditable result into a live-edit grid).
+- **New dependency: `github.com/ha1tch/tsqlparser`**, the same T-SQL
+  AST library xolu's own OQL planner already depends on for
+  equivalent push-down decisions (`PushJoin`/`PushAggregate`/
+  `PushFull` in xolu's own `pkg/oql/planner.go`) — reused rather than
+  duplicated with a separate, weaker heuristic.
+- Every design assumption verified empirically against the real
+  parser before being relied on, not trusted from the struct
+  definitions alone: confirmed a JOIN's two sides collapse into a
+  single `FromClause.Tables` entry (a different concrete AST type,
+  not two slice entries — a naive `len(Tables) == 1` check would have
+  wrongly classified joins as simple), and confirmed `COUNT(*)`'s
+  `*` lives inside the function's own argument, never the top-level
+  `SelectColumn.AllColumns` flag Go's own struct field would suggest
+  needed a separate check. Both findings changed the actual
+  implementation before it shipped, not just the tests.
+- 17 tests, covering every disqualifying shape and, separately, every
+  shape that must *not* disqualify (`WHERE`, `ORDER BY`, `TOP`,
+  `OFFSET`/`FETCH` narrow, order, or limit rows without changing what
+  each row is) — all passing on the first run once the AST behavior
+  was confirmed empirically.
+- Not yet wired to anything visible — this is the classifier alone,
+  built and verified standalone before any UI work depends on it.
+
+## [0.7.19] — 2026-08-12
+
+The graph-editing design's core, long-standing goal, completed:
+creating a real edge by dragging from one node's halo to another,
+with both the schema-ful and schema-less rules this session's design
+conversation established.
+
+- **"Clear relationship"** — right-click an edge, replacing the old
+  FSM-mode "Transition Properties" dialog that had no meaning against
+  xolu's own relationship model (a REF value on a field, not a first-
+  class object with its own properties). `SaveGraphEdge` extended:
+  an explicitly empty `newTo` clears the field rather than retargets
+  it — confirmed directly first that `PATCH` with a null value
+  genuinely removes the field server-side, not just stores a literal
+  null. `showFSMDialog` gained a configurable `saveLabel` and a fix
+  for an empty `fields` array (would have thrown) to support this as
+  a plain confirm-style dialog rather than a form.
+- **Edge creation via drag** — new `RefFieldsForType` endpoint
+  (with `hasSchema`, added after catching a real gap of my own before
+  it shipped: distinguishing a genuinely schema-less type from a
+  schema-ful one with no currently-usable field, since only the
+  former gets the permissive "any target, ask for a field name"
+  treatment). `onmousedown`/`onmouseup` wrapped in graph mode: left-
+  click-halo now starts a real drag (previously suppressed entirely)
+  and completes by calling the origin's own REF-field info, finding
+  the first empty field whose known target matches the drop (schema-
+  ful), or prompting for a field name when the origin's type has no
+  schema at all (schema-less) — then persists via the existing
+  `SaveGraphEdge`, same as retargeting already does.
+- **A long, genuinely instructive debugging arc getting the drag to
+  actually complete in a real browser.** `currentLink` kept coming
+  back `null` mid-drag no matter how the mouse movement was shaped
+  (single jump, ten-step interpolation, twenty small manual steps —
+  none of it was the cause). Traced it to a real, confirmed
+  `onmouseleave` firing mid-drag; traced that to the actual root
+  cause: the halo-click logic sets `selectedObject` to the drag's own
+  origin as a side effect of how it already works for FSM mode, and
+  the graph viewer's own selection-change logic reacted to that by
+  opening the inspect panel *mid-drag* — confirmed directly, the
+  canvas shrank by roughly 130px to make room for it, pulling the
+  still-held mouse position outside the new, smaller bounds. Not a
+  test artifact: a real person dragging in a real browser would hit
+  the identical disruption. Fixed by suppressing the inspect-panel
+  reaction for the drag's own duration.
+- Verified end to end against real, live CRM data for both paths:
+  schema-less (real drag between two freshly-created schema-less
+  entities, real field-name prompt, `related_to` genuinely persisted,
+  `_version` incremented) and schema-ful (a remembered target seeded
+  first, since the real CRM schema declares none; real drag from a
+  task with a genuinely empty `contact` field to a real contact node;
+  the field automatically matched with no prompt at all, since the
+  target was already known — confirmed persisted via a direct API
+  check independent of the UI). FSM mode's own halo behavior
+  re-confirmed unaffected.
+
+## [0.7.18] — 2026-08-12
+
+New-node creation in the graph viewer, end to end: double-click empty
+canvas, right-click to assign an entity type, fill in and submit the
+real entity form, node becomes a genuinely persisted xolu entity.
+
+- **Go**: `resolveEntityFields` converted from a method to a free
+  function (it never used its own receiver — mechanical, low-risk,
+  only 2 call sites). New `CreateGraphNode` endpoint, deliberately not
+  a reuse of `entities.go`'s own `Create` — that one redirects on
+  success, which has no new ID anywhere to read back. Built from the
+  same underlying pieces (`resolveEntityFields`,
+  `refTargetsForSubmission`, `formengine.ParseFormValues`,
+  `rememberNewRefTargets`) with a JSON response shaped for an AJAX
+  caller instead. 5 new tests; found one genuine mistake in a test of
+  my own (a form key omitted entirely rather than sent present-but-
+  empty, not how a real `<input>` element submits) — fixed the test,
+  confirmed the handler's own validation logic was correct as written.
+- **JS**: `showFSMDialog` gained an optional `select` field type
+  (entity-type picking from real, known types — no free-text typo
+  risk). New `showHTMLDialog`, a separate dialog for injecting
+  arbitrary HTML — specifically the real, unmodified `NewForm`
+  fragment, fetched via the `HX-Request` mechanism `WriteModalAware`
+  already understood (no new fragment endpoint needed at all — found
+  already built while investigating). `ondblclick` and `oncontextmenu`
+  wrapped for graph mode, matching the halo-interception pattern from
+  last session: double-click marks a new node `_graphDraft`, colours
+  it `invalid`; right-click on a draft node starts the type-assignment
+  flow; on success the node is upgraded in place (real `_graphNode`,
+  colour cleared) using a follow-up `Expand` call at depth 0 for the
+  real, server-computed data rather than approximating it from raw
+  submitted strings.
+- **A long, genuinely instructive debugging detour**: end-to-end
+  testing initially looked like a hung promise inside the new dialog
+  chain — spent a long stretch isolating it (bare functions, methods
+  on the real component instance, direct source dumps, line-by-line
+  logging) before finding it wasn't a hang or a bug in the application
+  at all. Two separate mistakes in the test scripts themselves: a bare
+  `'select'` locator matched the graph toolbar's own pre-existing
+  entity-type dropdown instead of the dialog's new one (the page
+  legitimately has two `<select>` elements); and an assumption that
+  the `role` field renders as a dropdown, when `resolveEntityFields`
+  actually renders it as plain text. Fixed both, then confirmed the
+  full flow genuinely works — real double-click, real right-click,
+  real form fill, real submit, node correctly transitions from a red
+  draft to a real, coloured-default node, confirmed persisted via a
+  direct API check independent of the UI.
+
+## [0.7.17] — 2026-08-12
+
+Foundational piece of a larger, still-in-progress graph-editing design
+(node/edge creation, entity-type assignment, schema-aware REF
+constraints — design agreed, implementation continuing next).
+
+- **Removed the free, user-initiated colour-cycling gesture entirely**
+  (Shift+click on a link) — confirmed it was reachable, ungated by
+  mode, in graph mode too (same class of issue as the halo and
+  context-menu bugs fixed last turn). It cycled through four colours
+  with no meaning attached to any of them — a demonstration of the
+  mechanism, never a real feature. Removed from the shared canvas
+  engine entirely, not just gated out of graph mode, since the same
+  reasoning applies wherever it's used. Confirmed FSM mode's own
+  stationary-click label-editing (restructured from the same
+  `if`/`else if` chain) is unaffected.
+- **New shared, semantic colour palette** (`seamStateColors`) — colour
+  now only ever reflects real, operative state, assigned
+  programmatically, never picked or cycled by a person. Two states so
+  far (`unsaved`, `invalid`), deliberately not exhaustive; more can be
+  added without touching any drawing code. The same palette backs both
+  nodes and edges, so the same colour value means the same thing
+  regardless of which object type it's applied to — no separate,
+  divergent colour vocabularies.
+- **`nodeColors`**, the node equivalent of the existing `linkColors`
+  map, wired into the actual node-drawing pass (mirroring exactly how
+  link colour overrides already worked) — plus `ensureNodeId`, nodes'
+  own counterpart to `ensureLinkId`, needed since nodes previously had
+  no stable identity of their own to key a colour map by. Verified the
+  override genuinely renders, not just that the JS state is set
+  correctly — sampled actual canvas pixels via `getImageData` before
+  and after setting a node's colour, confirmed a real, visible shift
+  from the default indigo stroke toward the assigned semantic red.
+
+## [0.7.16] — 2026-08-12
+
+- **Collapsed nodes in the graph viewer**, addressing the boundary
+  where depth (or the fetch ceiling, or an unreachable target) runs
+  out: previously the edge to that target was recorded but the target
+  itself was silently absent, so the JS side dropped the edge
+  entirely (nothing to draw it to). Now the target gets a real,
+  visible node — collapsed, minimal data — reusing
+  `fsm-canvas-engine.js`'s own double-circle terminal/accept-state
+  style (`isAcceptState`) rather than inventing a new visual.
+  - Server: `graphNode` gained `Collapsed`; the walker
+    (`internal/ui/graphrest.go`) adds a collapsed stub instead of
+    dropping an unfetched target, and correctly upgrades a stub to a
+    full node in place if a different path later reaches it with hop
+    budget to spare — confirmed with a dedicated test, not just
+    assumed correct from the logic.
+  - New `POST .../graph/expand` endpoint (and `restEmbedGraphRunner.
+    Expand`) fetches one specific collapsed node's real data plus one
+    hop of its own REFs, reusing the same walker.
+  - JS: clicking a collapsed node shows a distinct panel ("Collapsed
+    node: type#id") with an Expand action, rather than the normal
+    (and here pointless, given a stub has no real data) edit form.
+    Expanding merges the result into the live canvas in place —
+    upgrading an existing stub rather than duplicating it, skipping
+    edges already present — deliberately not a full re-query, which
+    would reset everyone's pan/zoom/position for no reason.
+  - **Collapse**, the explicit inverse: purely client-side, no server
+    call needed, since it only hides data already on the canvas.
+    Removes a node's own outgoing edges, then prunes any neighbor left
+    with nothing else touching it — a neighbor still needed by some
+    other, still-visible edge correctly stays. Confirmed against real,
+    densely-connected CRM data (25 deals sharing a small pool of
+    owners): expand and collapse round-tripped node/edge counts back
+    to their exact starting values.
+  - **Gesture: right-click on the halo** (the existing hover affordance
+    fsm-canvas-engine.js already shows near a node) toggles expand/
+    collapse — the fast path alongside the inspect panel's own button.
+    Left-click-halo is suppressed in graph mode entirely: there's no
+    xoluman feature yet for "create a new, real REF relationship" for
+    it to mean. Both were previously ungated by mode at all — checked
+    directly what they did in graph mode before this, and both were
+    actively broken (left: a fake, unpersisted `Link` silently created
+    between two real entities; right: a brand-new `Node` with no real
+    data behind it at all).
+  - **Found and fixed a second, unrelated, genuinely pre-existing bug**
+    while sanity-checking that FSM mode's own halo behavior was
+    unaffected: `canvas.onmouseup`'s `add-linked-node` drop-on-empty-
+    canvas path used `mouse.x`/`mouse.y` without the function ever
+    declaring a local `mouse` variable at all — every use of this FSM-
+    mode feature (right-click-halo, drag to empty space, release) threw
+    "mouse is not defined" and silently did nothing. Unrelated to
+    today's own changes (`onmouseup` was never touched by them), found
+    only because testing this turn's own work happened to exercise it
+    for the first time this session. Fixed.
+
+## [0.7.15] — 2026-08-12
+
+Prompted by a real bug report ("saved queries don't work, FSMs don't
+save, the graph doesn't persist, REFs should be edges") — every part
+investigated and fixed or rebuilt, each confirmed against real,
+running code, not assumed from reading the code alone.
+
+- **Fixed the actual root cause of "saved queries don't work" and
+  "FSMs don't save": two independent, stacked bugs.**
+  - `query-editor.js` never declared its own internal UI state
+    (`_showSaveForm`, `_result`, `_savedByMode`, etc.) as reactive Lit
+    properties — a plain property assignment updated the value but
+    never triggered a re-render, so clicking "Save…" silently did
+    nothing visible at all. Same missing-reactivity bug found and
+    fixed in `dxp-editor.js`, `grid-editor.js`, and two fields in
+    `fsm-editor.js` (`_name`/`_description`, later also
+    `_determinism`/`_graphQuery`) while auditing every component in
+    the same way.
+  - Underneath that: `ListSavedQueries` and the FSM layout save/load
+    logic both asked xolu for `Limit: 1000` "to get everything in one
+    call." It doesn't — xolu's own documented ceiling is 100 rows per
+    page (`docs/API_REFERENCE.md`); anything above that silently falls
+    back to the server's configured default (10), with no error. This
+    was xoluman's own misuse of a documented contract, not an xolu
+    bug — confirmed directly by checking the docs before concluding
+    otherwise. Fixed with `xoluext.ListAll`, a helper that properly
+    follows the pagination envelope; the same bug (and fix) found in
+    three more places while searching for it systematically: the
+    blob-folder browser and the field-metadata loader.
+- **Fixed a real, confirmed REF-integrity gap in the grid editor.**
+  Editing any REF-typed column failed outright (`XOLU-VL001`) — the
+  cell editor sent a bare raw ID, xolu correctly rejected it. Fixed
+  with the same REF-reconstruction the entity form already had, plus
+  a compound `"entityType:id"` fallback (remembered for next time)
+  for the common case where a REF field's schema declares no explicit
+  target — confirmed this is the common case directly against this
+  session's own CRM schema, not assumed.
+- **Fixed a real, confirmed bug in the list view's REF display.** REF
+  fields were unconditionally excluded from the glance columns (their
+  JSON Schema `Type` is `"object"`, swept up by the same exclusion
+  rule as genuine object/array fields), and where a REF's target
+  wasn't known, cells leaked raw Go map formatting straight into the
+  page (`map[entity:companies id:13 type:REF]`). Fixed: REF fields
+  included, a readable label shown even without a known target,
+  clickable link only when the target is genuinely known.
+- **Rebuilt the graph viewer entirely on plain REST — no query
+  language at all**, after digging into `pkg/oql`/`pkg/sulpher` and
+  finding that the real blocker (XM-9, `xoluman-xolu-consolidated-
+  report-log.md`) is a genuine xolu-side regression: documented
+  whole-node `RETURN` fails against schema-adapted entities. Rather
+  than wait on that, or reimplement Sulpher's own parser client-side
+  (tried, then undone — reusing another system's grammar isn't "using
+  the REST API"), the new implementation walks REF fields directly:
+  fetch bare (`embed_depth=0` explicitly — a server-hydrated value
+  never self-identifies its own entity type, confirmed directly; only
+  a bare pointer reliably does), then hydrate hop by hop via
+  `xoluext.GetWithEmbed`, a new client-library gap found and worked
+  around the same way (`xoluext.ListWithEmbed`, wrapping `client.Raw`
+  — itself xolu's own sanctioned escape hatch, built specifically for
+  this). Filed as XM-10. The old Sulpher-based path is preserved, not
+  deleted — `graphSulpherDormant`, its own tests retargeted rather
+  than removed, ready to reactivate once XM-9 resolves.
+  - New entity-type + depth picker replaces the old free-text Sulpher
+    query box; a new `GET .../entity-types` endpoint feeds it.
+  - Found and fixed a second, real, pre-existing bug while testing
+    the rebuilt viewer end to end: the graph inspect panel's node-save
+    request never actually included the entity type at all
+    (`original.type` read from the entity's own domain data, which
+    has no such field — the request silently omitted `type` entirely,
+    and xolu correctly rejected every save). Confirmed via a real
+    save attempt, not assumed from reading the code; fixed by storing
+    the type explicitly, separate from the entity's own data. Edge
+    retargeting was already correct — confirmed with a real,
+    successful save.
+  - Verified against real, live CRM data throughout: correct node/edge
+    types and counts, correct dedup across multiple paths to the same
+    target, correct hop-depth clamping (tested with a real 10-deep
+    chain), a successful real node edit and a successful real edge
+    retarget, both confirmed via independent API checks afterward.
+
+## [0.7.14] — 2026-08-12
+
+- **Integrated xolu v0.30.14** (up from v0.30.10). Full build, vet,
+  and test suite green, no code changes needed on xoluman's side.
+- **Every remaining item from the entire xoluman → xolu report
+  campaign is now resolved — twelve numbered findings across two
+  report rounds, all independently confirmed against real, running
+  code, not taken on any changelog's word:**
+  - **XM-5** (`OFFSET`/`FETCH NEXT` a silent no-op) — v0.30.13.
+    Verified: the exact isolation query now returns exactly 3 rows,
+    correctly starting at row 3.
+  - **XM-6** (nested object fields failing on adapted-table insert) —
+    v0.30.11. Verified by running the real, unmodified CRM seed
+    script — `companies.address` intact, no stripped test copy — for
+    the first time since this was found; completed fully, and reading
+    the data back confirmed a genuine round-trip, not just a
+    successful write.
+  - **XM-7b** (decimal fields scaled/mangled through JOIN) — v0.30.14,
+    the last item in the whole campaign. Verified: the same JOIN query
+    now returns `"5000.66"`, not `33300065`. The now-resolved comment
+    documenting this was removed from the "Deals with their company's
+    industry" saved query.
+  - **XM-8** (no way to create a calendar through the public API) —
+    v0.30.12. Verified with the full, real workflow this was always
+    supposed to be: create a calendar, propose a booking, confirm it,
+    list both — real HTTP calls end to end, not a partial check.
+- **The real CRM example seed script is fully unblocked** for the
+  first time since XM-6 was found — no more temporary, address-
+  stripped workaround copy needed for any verification going forward.
+- `ts`, `bal`, and `cal` are now all genuinely usable through
+  xoluman's own client dependency — none of the three has UI built
+  for it in xoluman yet; that's real, additive follow-up work, not
+  anything blocked or owed to xolu.
+- Both report documents (the full consolidated log and the pending-
+  only view) updated to reflect the campaign's completion and
+  re-delivered — the pending-only report now states plainly that
+  nothing is pending.
+
+## [0.7.13] — 2026-08-12
+
+- **Integrated xolu v0.30.10** (up from v0.30.8). Full build, vet, and
+  test suite green, no code changes needed on xoluman's side.
+- **Re-verified all five remaining pending items — all unchanged.**
+  v0.30.9 closed out xolu's own internal XOT180 audit entirely (ten
+  real fixes, "all four audit threads complete"), but its final
+  thread was a different, unrelated workstream — general tenant-
+  isolation coverage across six list-shaped endpoints
+  (`handleDxpDefList`/`handleDxpTxnList`, `handleFSMMachineList`,
+  `handleEventList`, `handleSeqList`/`handleGenList`,
+  `handleBlobList`) — none of which overlap XM-5, XM-6, XM-7, or
+  XM-8. v0.30.10 was a register bookkeeping correction only (a stale
+  duplicate tracking item closed with a cross-reference), no code
+  change at all. Confirmed all five directly against a fresh v0.30.10
+  instance rather than assumed unchanged from the changelog's silence
+  on them: `OFFSET`/`FETCH NEXT` still returns every row (XM-5),
+  `companies.address` still fails to insert (XM-6), decimal fields
+  through JOIN are still scaled/mangled (XM-7b), and calendar creation
+  through the public API is still impossible (XM-8). `ts` and `bal`
+  remain fully working, unaffected either way.
+- Both report documents (the full consolidated log and the pending-
+  only filtered view) updated to reflect this and re-delivered.
+
+## [0.7.12] — 2026-08-11
+
+- **CRM example: JOIN re-enabled** now that XM-3a is genuinely fixed —
+  a new saved query, "Deals with their company's industry", a real
+  `INNER JOIN` (`deals AS a INNER JOIN companies AS b ON a.company.id
+  = b.id` — `.id`, not bare `company`, since a REF field is a
+  structured object, not a bare foreign key). Verified end-to-end
+  against a real, freshly-seeded instance, not just that it saves.
+- **Investigated whether the real seed script (with `companies.address`
+  intact) could be made to work again against v0.30.5, given XM-6 —
+  no viable workaround found.** Schema registration has no opt-out
+  from adaptation; the only way to avoid XM-6 would be dropping schema
+  validation for `companies` entirely (losing `additionalProperties:
+  false` and the `industry` enum constraint), which is a real
+  regression, not a genuine fix. The real seed script stays correctly
+  blocked on XM-6 upstream — verified this session's work using a
+  temporary, address-stripped copy instead, as before.
+- **Two new JOIN limitations found while building the new query, filed
+  as XM-7**: aggregate functions (`COUNT`, `AVG`, etc.) still aren't
+  supported in a JOIN's own `SELECT` list — confirmed directly, a
+  different gap from XM-3a's `tenant_id` bug, never previously
+  reported. And decimal fields come back scaled and mangled through
+  JOIN specifically — `deals.amount` of `"333000.65"` (correct via
+  direct fetch and non-JOIN OQL) reads as `33300065` through a JOIN
+  (a consistent ×100 scale, decimal point stripped). `ORDER BY` still
+  sorts correctly since the scale is constant, so the new saved query
+  was kept with the issue documented in a code comment, rather than
+  either shipping a silently-wrong number or dropping a genuinely
+  useful query over a display bug.
+- Checked xoluman's own register for any other work unblocked by the
+  new xolu version — only T-04 (the keyring backend) remains open,
+  still blocked on a real OS keyring service this sandbox can't
+  provide.
+
+## [0.7.11] — 2026-08-11
+
+- **Integrated xolu v0.30.5** (up from v0.30.0). Full build, vet, and
+  test suite green, no code changes needed on xoluman's side.
+  `go.mod` updated to match (relative `../xolu` replace directive
+  unchanged).
+- **Re-verified every open item in the consolidated xolu report log
+  against v0.30.5, independently, not on the changelog's word alone.**
+  Full results in the updated report (delivered separately):
+  - **XM-3a (JOIN's missing `tenant_id`) and XM-4 (DXP partial-update
+    staleness) — both genuinely resolved**, confirmed by direct
+    reproduction of the original failing queries against a real,
+    freshly-seeded instance.
+  - **XM-3b (`LIMIT`) — confirmed resolved as "won't implement,"
+    `TOP N` is the real answer** and now genuinely works with `JOIN`
+    too, since 3a is fixed.
+  - **XM-5 (`OFFSET`/`FETCH NEXT` doesn't paginate) — still broken**,
+    re-confirmed with fresh evidence, despite xolu's own v0.30.5
+    changelog describing it as "verified end-to-end against a real
+    server."
+  - **XM-2 (`ts`/`cal`/`bal` client methods) — still entirely
+    unaddressed**, checked directly.
+  - **New: XM-6** — nested (non-REF) object fields fail to insert
+    into an adapted table, a real, apparently unintended side effect
+    of the XM-4 fix itself (schema adaptation now correctly reaching
+    named tenants for the first time, exposing a latent gap in the
+    adapted-insert path that blob storage's plain-JSON handling had
+    always silently covered for). Currently blocks the real CRM
+    example's own seed script from completing against v0.30.5 as-is —
+    verified XM-3/XM-4 using a temporary, address-field-stripped copy
+    of the seed script instead of changing the real one.
+- The CRM example's own saved queries have not yet been updated to
+  use `JOIN`/`TOP` now that XM-3a is fixed, and XM-6 still blocks a
+  real seed run with the `address` field intact — both left for a
+  follow-up pass.
+
+## [0.7.10] — 2026-08-07
+
+- **Integrated xolu v0.30.0** (up from v0.27.1). Full build, vet, and
+  test suite green against the new version with zero code changes
+  needed — no breaking changes found. Re-ran the full CRM example
+  end-to-end (schemas, entities, both FSM defs, both DXP transactions,
+  bal accounts, blob attachments, all 17 saved queries) against a
+  live v0.30.0 instance — everything that worked before still works.
+  - Checked directly, not assumed: v0.30.0's own changelog confirms
+    `examples/crm` was independently removed from xolu itself
+    ("the xoluman team has already improved on it and now maintains
+    it as their own worked end-user example") — the same move made
+    here at v0.7.7, arrived at independently on xolu's side.
+  - None of the three specific findings reported earlier this session
+    show any change in v0.30.0, re-confirmed directly against the new
+    version: the `ts`/`cal`/`bal` client-method gaps from the letter
+    (still zero `ts` methods, still no `CalListBookings`/
+    `BalListAccounts`), both OQL JOIN bugs (missing `tenant_id` in
+    generated JOIN SQL; `JOIN`+`LIMIT` parsed as two statements), and
+    the DXP-partial-update graph staleness finding (a DXP-patched
+    deal's untouched `amount` field still reads as `null` through
+    Sulpher). Noted honestly rather than assumed fixed just because
+    the version number moved.
+  - **`go.mod` fixed**: the `replace github.com/ha1tch/xolu` directive
+    had an absolute, sandbox-only path (`/home/claude/work/xolu`)
+    baked into every checkpoint shipped this session — flagged
+    earlier, not acted on until now. Switched to a relative path
+    (`../xolu`), portable across any machine where xolu and xoluman
+    are checked out as sibling directories, which is how this sandbox
+    itself is laid out. Version requirement also updated to match
+    (`v0.27.1` → `v0.30.0`).
+
 ## [0.7.9] — 2026-08-07
 
 - **CRM example**: both queries OQL's own JOIN bugs (see v0.7.8) had

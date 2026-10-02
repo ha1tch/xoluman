@@ -36,17 +36,13 @@ import (
 	"strings"
 
 	"github.com/ha1tch/xolu/pkg/client"
+
+	"github.com/ha1tch/xoluman/internal/xoluext"
 )
 
 // FolderEntityType is the bookkeeping entity type name empty-folder
 // records are stored under.
 const FolderEntityType = "xoluman_blob_folder"
-
-// maxFolderRows bounds a single folder-entity fetch — a reasonable
-// ceiling for a bookkeeping table, matching internal/fieldmeta's own
-// reasoning, though set higher here since a large blob hierarchy could
-// plausibly have more folders than a typical field-meta table has rows.
-const maxFolderRows = 1000
 
 // folder is one xoluman_blob_folder entity, decoded from its raw
 // document.
@@ -262,7 +258,7 @@ func resolveFolderID(ctx context.Context, c *client.Client, path []string) (int6
 // childFolders returns every xoluman_blob_folder entity whose parent
 // is parentID (0 meaning root — no parent field set at all).
 func childFolders(ctx context.Context, c *client.Client, parentID int64) ([]folder, error) {
-	result, err := c.List(ctx, FolderEntityType, &client.ListParams{Limit: maxFolderRows})
+	entities, err := xoluext.ListAll(ctx, c, FolderEntityType)
 	if err != nil {
 		if xoluErr, ok := err.(*client.Error); ok && xoluErr.HTTPStatus == 404 {
 			return nil, nil // entity type doesn't exist yet — no folders have ever been created
@@ -270,7 +266,7 @@ func childFolders(ctx context.Context, c *client.Client, parentID int64) ([]fold
 		return nil, err
 	}
 	var out []folder
-	for _, e := range result.Entities {
+	for _, e := range entities {
 		f := decodeFolder(e)
 		if f.ParentID == parentID {
 			out = append(out, f)

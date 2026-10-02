@@ -25,6 +25,8 @@ import (
 	"fmt"
 
 	"github.com/ha1tch/xolu/pkg/client"
+
+	"github.com/ha1tch/xoluman/internal/xoluext"
 )
 
 // EntityType is the bookkeeping entity type name field-meta documents
@@ -34,13 +36,6 @@ const EntityType = "xoluman_field_meta"
 // defaultRefOptionsField is which field on a ref-sourced document holds
 // its own options list, when Meta.RefOptionsField is left empty.
 const defaultRefOptionsField = "options"
-
-// maxFieldMetaRows bounds a single LoadForEntityType fetch — a
-// reasonable ceiling for a bookkeeping table (one row per configured
-// dropdown field across an entire xolu instance). Not paginated further
-// in v1; documented as a limitation, not silently capped without
-// saying so.
-const maxFieldMetaRows = 500
 
 // Option is one key/value choice. Represented uniformly for both
 // integer- and string-typed target fields — for a string field, Key
@@ -72,8 +67,18 @@ type Meta struct {
 // both simpler and avoids constructing query strings from data at all.
 // A xoluman_field_meta entity type that hasn't been created yet (no
 // rows, possibly no schema) is not an error — returns an empty map.
+//
+// Genuinely fetches every row now, via xoluext.ListAll — the earlier
+// version here (a single c.List with Limit: 500) was never actually
+// getting more than the first 10, xolu's own documented per_page
+// ceiling being 100 (docs/API_REFERENCE.md) with the server falling
+// back to its own configured default, not clamping, for anything
+// above that. Confirmed directly, the same real bug found in this
+// session's saved-queries and FSM-layout code, not a deliberate,
+// documented v1 limitation as the comment here used to (incorrectly)
+// claim.
 func LoadForEntityType(ctx context.Context, c *client.Client, entityType string) (map[string]Meta, error) {
-	result, err := c.List(ctx, EntityType, &client.ListParams{Limit: maxFieldMetaRows})
+	entities, err := xoluext.ListAll(ctx, c, EntityType)
 	if err != nil {
 		if xoluErr, ok := err.(*client.Error); ok && xoluErr.HTTPStatus == 404 {
 			return map[string]Meta{}, nil // entity type doesn't exist yet — no field metadata configured anywhere
@@ -82,7 +87,7 @@ func LoadForEntityType(ctx context.Context, c *client.Client, entityType string)
 	}
 
 	out := make(map[string]Meta)
-	for _, e := range result.Entities {
+	for _, e := range entities {
 		m, err := decodeMeta(e.Data)
 		if err != nil {
 			continue // a malformed row shouldn't break every other field's rendering — skip it

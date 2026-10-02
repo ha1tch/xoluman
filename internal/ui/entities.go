@@ -276,7 +276,18 @@ const maxPreviewColumns = 4
 func previewFields(fields []xclient.FieldDef) []xclient.FieldDef {
 	out := make([]xclient.FieldDef, 0, maxPreviewColumns)
 	for _, f := range fields {
-		if f.Type == "object" || f.Type == "array" {
+		// A REF field's own JSON Schema Type is "object" (the
+		// reference-ness lives in Format, a separate key — confirmed
+		// directly against a real schema: {"type":"object",
+		// "format":"ref"}) — excluding every object-typed field here
+		// unconditionally silently excluded every REF field too, so
+		// the list row renderer's own, already-correct REF handling
+		// (RefJumpButton, a few lines below in this file) never once
+		// got a REF field to render in practice. Genuine object/array
+		// fields (no meaningful single-line glance value) still stay
+		// excluded; only the ref-formatted subset of "object" is let
+		// through.
+		if (f.Type == "object" && f.Format != "ref") || f.Type == "array" {
 			continue
 		}
 		out = append(out, f)
@@ -449,17 +460,34 @@ func entityListTable(connName, entityType string, preview []xclient.FieldDef, re
 			cells = append(cells, b.Td(mi.Class(td), idStr))
 			for _, f := range preview {
 				value := e.Data[f.Name]
-				if target, isRef := refTargets[f.Name]; isRef {
+				if f.Format == "ref" || f.Type == "ref" {
 					if id, embeddedLabel, ok := refValueInfo(value); ok {
-						refURL := entitiesBasePath(connName, target) + "/" + strconv.FormatInt(id, 10) + "/edit"
 						linkText := embeddedLabel
 						if linkText == "" {
 							linkText = strconv.FormatInt(id, 10)
 						}
-						cells = append(cells, b.Td(mi.Class(td),
-							b.A(mi.Href(refURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), linkText),
-							RefJumpButton(refURL)(b),
-						))
+						if target, known := refTargets[f.Name]; known {
+							refURL := entitiesBasePath(connName, target) + "/" + strconv.FormatInt(id, 10) + "/edit"
+							cells = append(cells, b.Td(mi.Class(td),
+								b.A(mi.Href(refURL), mi.Class("text-indigo-600 dark:text-indigo-400 hover:underline"), linkText),
+								RefJumpButton(refURL)(b),
+							))
+						} else {
+							// Target entity type genuinely isn't known
+							// anywhere (no schema declaration, nothing
+							// remembered yet) — still show the readable
+							// id/embedded-label form rather than
+							// falling through to previewValue, whose
+							// default case has no real handling for a
+							// raw map and previously leaked Go's own
+							// %v formatting straight into the page
+							// (confirmed directly: a cell literally
+							// read "map[entity:companies id:13
+							// type:REF]"). No clickable link here,
+							// since building one needs the target
+							// entity type this field doesn't have.
+							cells = append(cells, b.Td(mi.Class(td), linkText))
+						}
 						continue
 					}
 				}
@@ -489,8 +517,11 @@ func entityListTable(connName, entityType string, preview []xclient.FieldDef, re
 const previewMaxStringLen = 60
 
 // previewValue renders a single list-cell value from an entity's decoded
-// JSON data (string, float64, bool, or nil/absent — object/array fields
-// never reach here, previewFields already excludes them).
+// JSON data (string, float64, bool, or nil/absent). Genuine object/array
+// fields never reach here — previewFields excludes them. REF-formatted
+// fields (JSON Schema type "object", format "ref") also never reach
+// here: the row-rendering loop above intercepts them before this
+// function is called at all, rendering a RefJumpButton instead.
 func previewValue(v any) string {
 	switch t := v.(type) {
 	case nil:
@@ -548,7 +579,7 @@ func paginationBar(basePath string, page, totalPages int) mi.H {
 // no schema AND no existing data to infer from either. The caller
 // should show a clear message then, not attempt to render a
 // meaningless empty form.
-func (h *EntitiesHandler) resolveEntityFields(ctx context.Context, c *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
+func resolveEntityFields(ctx context.Context, c *xclient.Client, entityType string, known *xclient.Entity) (fields []xclient.FieldDef, schemaOut *xclient.EntitySchema, ok bool, err error) {
 	schema, schemaErr := c.GetEntitySchema(ctx, entityType)
 	switch {
 	case schemaErr == nil:
@@ -600,7 +631,7 @@ func (h *EntitiesHandler) NewForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
+	fields, schema, ok, err := resolveEntityFields(r.Context(), c, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return
@@ -633,7 +664,7 @@ func (h *EntitiesHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fields, schema, ok, err := h.resolveEntityFields(r.Context(), c, entityType, nil)
+	fields, schema, ok, err := resolveEntityFields(r.Context(), c, entityType, nil)
 	if err != nil {
 		writeUpstreamError(w, name, r.URL.Path, err)
 		return

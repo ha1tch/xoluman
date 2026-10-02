@@ -1347,8 +1347,36 @@ function _startHaloAnim() {
 // Per-link guard/action properties (keyed by link._id)
 var _linkIdCounter = 0;
 var linkProperties = new Map(); // _id → {guard, action, output} — output added for xoluman's use (xolu transitions carry a distinct output value, separate from any action/side-effect text); Seam's own property editor and save/load only ever handled guard/action
-// Per-link custom colour. Cycled by Shift+click.
+// Per-link custom colour. Set programmatically to reflect real state
+// (see seamStateColors below) — never user-cycled; the comment this
+// replaces ("cycled by Shift+click") described a demonstration-only
+// mechanism that's been removed entirely, not a real feature.
 var linkColors = new Map(); // _id → colour string
+// Per-node custom colour — same reasoning and same rule as
+// linkColors: state-driven only, drawn from the identical palette
+// below, never a separate colour vocabulary for nodes vs edges.
+var nodeColors = new Map(); // _id → colour string
+
+// seamStateColors is the single, shared semantic palette both
+// nodeColors and linkColors draw from — the same colour value means
+// the same thing regardless of which object type it's applied to.
+// Two states so far, both about xoluman's own graph-viewer node/edge
+// creation flow (a canvas object can exist locally before xolu knows
+// about it at all):
+//   - unsaved: this node or edge exists only in the browser right
+//     now — valid, ready to persist, but the real Create/Patch call
+//     hasn't happened (or hasn't succeeded) yet.
+//   - invalid: this node cannot be persisted yet at all — missing
+//     required fields, or no entity type assigned. Nodes only for
+//     now; an edge has no equivalent "partially formed" state of its
+//     own, since it's just a REF value pointing somewhere.
+// Deliberately not exhaustive — more states can be added here as
+// they come up, without touching the drawing code that reads them.
+var seamStateColors = {
+	unsaved: '#f59e0b',  // amber
+	invalid: '#dc2626',  // red
+};
+
 
 var canvas;
 var nodeRadius = 30;
@@ -1521,7 +1549,8 @@ function drawUsing(c) {
 			c.fillStyle = c.strokeStyle = 'blue';
 			seamActiveLabelColor = 'blue';
 		} else {
-			c.fillStyle = c.strokeStyle = seamNodeStrokeColor;
+			var _nc = nodes[i]._id ? (nodeColors.get(nodes[i]._id) || null) : null;
+			c.fillStyle = c.strokeStyle = _nc || seamNodeStrokeColor;
 			seamActiveLabelColor = seamNodeLabelColor;
 		}
 		nodes[i].draw(c);
@@ -1811,10 +1840,25 @@ function showFSMDialog(opts) {
 				color: dark ? '#94a3b8' : '#64748b',
 				marginBottom:'4px', textTransform:'uppercase', letterSpacing:'0.05em',
 			});
-			var inp = document.createElement('input');
-			inp.type = 'text';
-			inp.value = field.value || '';
-			inp.placeholder = field.placeholder || '';
+			var inp;
+			if(field.type === 'select') {
+				// A dropdown of known-valid options, e.g. entity types
+				// (graph mode's own new-node creation) -- avoids the
+				// typo-prone free-text alternative for a value that has
+				// a small, real, already-known set of valid choices.
+				inp = document.createElement('select');
+				(field.options || []).forEach(function(opt) {
+					var o = document.createElement('option');
+					o.value = opt; o.textContent = opt;
+					if(opt === field.value) o.selected = true;
+					inp.appendChild(o);
+				});
+			} else {
+				inp = document.createElement('input');
+				inp.type = 'text';
+				inp.value = field.value || '';
+				inp.placeholder = field.placeholder || '';
+			}
 			Object.assign(inp.style, {
 				width:'100%', boxSizing:'border-box',
 				padding:'7px 10px', fontSize:'13px', borderRadius:'6px',
@@ -1846,7 +1890,7 @@ function showFSMDialog(opts) {
 		});
 		cancelBtn.onclick = function() { _dismiss(null); };
 		var saveBtn = document.createElement('button');
-		saveBtn.textContent = 'Save';
+		saveBtn.textContent = opts.saveLabel || 'Save';
 		Object.assign(saveBtn.style, {
 			padding:'6px 16px', fontSize:'13px', fontWeight:'600',
 			borderRadius:'6px', border:'none', cursor:'pointer',
@@ -1872,10 +1916,112 @@ function showFSMDialog(opts) {
 				modal.style.transform = 'scale(1)';
 			});
 		});
-		setTimeout(function() { var first = inputs[opts.fields[0].key]; if(first) first.focus(); }, 50);
+		setTimeout(function() { if(opts.fields.length === 0) return; var first = inputs[opts.fields[0].key]; if(first) first.focus(); }, 50);
 		var onKey = function(ev) {
 			if(ev.key === 'Escape') { _dismiss(null); }
 		};
+		document.addEventListener('keydown', onKey);
+	});
+}
+
+// showHTMLDialog is showFSMDialog's own counterpart for arbitrary HTML
+// content rather than a fixed fields array — specifically for
+// injecting a real, server-rendered <form> fragment (the entity
+// form the graph viewer's new-node creation flow fetches from
+// NewForm, unmodified — see fsm-editor.js's own _assignEntityType)
+// rather than reconstructing field inputs by hand a second time.
+// Resolves with the injected root element's own <form> (for the
+// caller to read via FormData) on save, or null on cancel — the
+// caller owns validation/submission, this only owns showing and
+// dismissing the chrome around it.
+function showHTMLDialog(opts) {
+	return new Promise(function(resolve) {
+		var dark = document.documentElement.classList.contains('dark');
+		var backdrop = document.createElement('div');
+		Object.assign(backdrop.style, {
+			position:'fixed', inset:'0',
+			background:'rgba(0,0,0,0)', backdropFilter:'blur(2px)',
+			zIndex:'9999', display:'flex', alignItems:'center', justifyContent:'center',
+			transition:'background 220ms ease',
+		});
+		var modal = document.createElement('div');
+		Object.assign(modal.style, {
+			background: dark ? '#1e293b' : '#ffffff',
+			borderRadius:'12px', boxShadow:'0 20px 60px rgba(0,0,0,0.3)',
+			width: opts.width || '440px', maxWidth:'calc(100vw - 32px)',
+			maxHeight:'calc(100vh - 64px)', overflow:'auto', fontFamily:'inherit',
+			opacity:'0', transform:'scale(0.70)',
+			transition:'opacity 200ms ease, transform 200ms ease',
+			fontSize:'13px', // smaller than the full entity form's own default -- this is a small floating panel, not a full page
+		});
+		var header = document.createElement('div');
+		Object.assign(header.style, {
+			padding:'14px 18px', borderBottom:'1px solid ' + (dark ? '#334155' : '#e2e8f0'),
+			display:'flex', alignItems:'center', justifyContent:'space-between',
+			position:'sticky', top:'0', background: dark ? '#1e293b' : '#ffffff', zIndex:'1',
+		});
+		var titleEl = document.createElement('div');
+		Object.assign(titleEl.style, { fontWeight:'600', fontSize:'14px', color: dark ? '#f1f5f9' : '#0f172a' });
+		titleEl.textContent = opts.title;
+		var closeBtn = document.createElement('button');
+		closeBtn.innerHTML = '<span class="material-icons" style="font-size:18px;line-height:1">close</span>';
+		Object.assign(closeBtn.style, {
+			background:'none', border:'none', cursor:'pointer',
+			color: dark ? '#94a3b8' : '#64748b', padding:'2px', borderRadius:'4px',
+			display:'flex', alignItems:'center',
+		});
+		function _dismiss(result) {
+			document.removeEventListener('keydown', onKey);
+			backdrop.style.background = 'rgba(0,0,0,0)';
+			modal.style.opacity = '0';
+			modal.style.transform = 'scale(0.70)';
+			setTimeout(function() {
+				if(backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+				resolve(result);
+			}, 220);
+		}
+		closeBtn.onclick = function() { _dismiss(null); };
+		header.append(titleEl, closeBtn);
+
+		var body = document.createElement('div');
+		body.style.cssText = 'padding:16px 18px;';
+		body.innerHTML = opts.html;
+		var formEl = body.querySelector('form');
+
+		var footer = document.createElement('div');
+		Object.assign(footer.style, {
+			padding:'12px 18px', borderTop:'1px solid ' + (dark ? '#334155' : '#e2e8f0'),
+			display:'flex', justifyContent:'flex-end', gap:'8px',
+			position:'sticky', bottom:'0', background: dark ? '#1e293b' : '#ffffff',
+		});
+		var cancelBtn = document.createElement('button');
+		cancelBtn.textContent = 'Cancel';
+		Object.assign(cancelBtn.style, {
+			padding:'6px 14px', fontSize:'13px', borderRadius:'6px', cursor:'pointer',
+			border:'1px solid ' + (dark ? '#475569' : '#cbd5e1'),
+			background:'none', color: dark ? '#e2e8f0' : '#1e293b',
+		});
+		cancelBtn.onclick = function() { _dismiss(null); };
+		var saveBtn = document.createElement('button');
+		saveBtn.textContent = opts.saveLabel || 'Save';
+		Object.assign(saveBtn.style, {
+			padding:'6px 14px', fontSize:'13px', borderRadius:'6px', cursor:'pointer',
+			border:'1px solid #4f46e5', background:'#4f46e5', color:'#fff',
+		});
+		saveBtn.onclick = function() { _dismiss(formEl); };
+		footer.append(cancelBtn, saveBtn);
+
+		modal.append(header, body, footer);
+		backdrop.appendChild(modal);
+		document.body.appendChild(backdrop);
+		requestAnimationFrame(function() {
+			requestAnimationFrame(function() {
+				backdrop.style.background = 'rgba(0,0,0,0.45)';
+				modal.style.opacity = '1';
+				modal.style.transform = 'scale(1)';
+			});
+		});
+		var onKey = function(ev) { if(ev.key === 'Escape') _dismiss(null); };
 		document.addEventListener('keydown', onKey);
 	});
 }
@@ -1884,6 +2030,15 @@ function showFSMDialog(opts) {
 function ensureLinkId(link) {
 	if(!link._id) link._id = ++_linkIdCounter;
 	return link._id;
+}
+
+// ensureNodeId is ensureLinkId's own counterpart for nodes — same
+// lazy-assignment pattern, its own counter so node and link ids never
+// collide despite sharing the same conceptual shape.
+var _nodeIdCounter = 0;
+function ensureNodeId(node) {
+	if(!node._id) node._id = ++_nodeIdCounter;
+	return node._id;
 }
 
 function initFSM(canvasEl) {
@@ -2117,6 +2272,7 @@ function initFSM(canvasEl) {
 	};
 
 	canvas.onmouseup = function(e) {
+		var mouse = crossBrowserRelativeMousePos(e);
 		var didDrag = _hasDragged;
 		movingObject = false;
 		panningCanvas = false;
@@ -2151,21 +2307,17 @@ function initFSM(canvasEl) {
 			draw();
 		}
 
-		// Shift+click on a committed link: cycle its colour
-		if(!didDrag && e.shiftKey && currentLink == null &&
-		   selectedObject != null && !(selectedObject instanceof Node)) {
-			ensureLinkId(selectedObject);
-			var _cycle = [seamAccentColor, '#4b0082', '#8b0000', null];
-			var _cur = linkColors.get(selectedObject._id) || null;
-			var _idx = _cycle.indexOf(_cur);
-			var _next = _cycle[(_idx + 1) % _cycle.length];
-			if(_next === null) linkColors.delete(selectedObject._id);
-			else linkColors.set(selectedObject._id, _next);
-			selectedObject = null; // deselect so custom colour is immediately visible
-			draw();
+		// Colour is semantic (reflects real, operative state — see
+		// seamStateColors below) and is never a user-cycled, aesthetic-
+		// only choice — Shift+click used to cycle a link through four
+		// arbitrary colours with no meaning behind any of them, purely
+		// a demonstration of the mechanism, not a real feature. Removed
+		// entirely, not just gated out of graph mode: the same
+		// reasoning applies wherever this canvas engine is used.
+
 		// Activate label editing only on a stationary click with no link being committed
-		} else if(!didDrag && !e.shiftKey && currentLink == null &&
-		          selectedObject != null && 'text' in selectedObject) {
+		if(!didDrag && !e.shiftKey && currentLink == null &&
+		   selectedObject != null && 'text' in selectedObject) {
 			editingLabel = true;
 			resetCaret();
 		}

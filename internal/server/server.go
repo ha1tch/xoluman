@@ -50,6 +50,7 @@ func New(store connstore.Store) http.Handler {
 	ui.RegisterQueryModule(reg, store)
 	ui.RegisterDXPModule(reg, store)
 	ui.RegisterFSMModule(reg, store)
+	ui.RegisterSeedsModule(reg, store)
 	reg.MountAll(mux)
 	ui.SetSidebarStore(store)
 

@@ -8,5 +8,11 @@
       "file": "docs/KNOWN_ISSUES.md",
       "match": "^Version: (.+)$"
     }
-  ]
+  ],
+  "wave_short_names": {
+    "1": "Seed Management Completeness"
+  },
+  "wave_visibility": {
+    "1": true
+  }
 }

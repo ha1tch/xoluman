@@ -11,6 +11,7 @@ import (
 	"html"
 	"net/http"
 	"strconv"
+	"strings"
 
 	mi "github.com/ha1tch/minty"
 	xclient "github.com/ha1tch/xolu/pkg/client"
@@ -101,7 +102,7 @@ func buildGridColumns(fields []xclient.FieldDef, fieldOptions map[string][]field
 		case f.Format == "decimal":
 			editor = "input" // stays text — no numeric editor, same reasoning as formengine/RenderFields: avoid float64 precision loss end to end
 		case f.Format == "ref" || f.Type == "ref":
-			editor = "input" // raw target ID, same v1 limitation as the entity form
+			editor = "input" // raw target ID typed in; GridSave reconstructs the real {type:REF,...} shape server-side (reconstructRefValues) before writing — no picker UI here yet, that's the remaining v1 limitation, not save failing outright
 		case f.Type == "integer" || f.Type == "number":
 			editor = "number"
 		case f.Type == "boolean":
@@ -291,17 +292,147 @@ func (h *EntitiesHandler) GridSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The grid's own cell editor has no way to submit anything but a
+	// raw string/number per cell (Tabulator's "input"/"number"/
+	// "tickCross" editors, see buildGridColumns) — a REF-typed column
+	// edits as a bare target ID, exactly like the entity form's own
+	// text input did before refTargetsForSubmission existed. Without
+	// this same reconstruction step here, xolu's own validation
+	// correctly rejects the bare ID outright (confirmed directly:
+	// XOLU-VL001 on every attempt) — not silent corruption, since
+	// xolu's write-side validation catches it, but the grid's own
+	// REF-column editing was completely unusable as a result. Same
+	// fix, same helper, applied to the one write path that hadn't
+	// gotten it yet.
+	schema, schemaErr := c.GetEntitySchema(r.Context(), entityType)
+	if schemaErr != nil && !isNotFoundError(schemaErr) {
+		writeJSONError(w, schemaErr, name)
+		return
+	}
+	refTargets := refTargetsForSubmission(r.Context(), c, schema)
+
+	// refFieldNames identifies every REF-formatted field even when its
+	// target isn't known yet — needed so reconstructRefValues can
+	// still recognize a REF field and accept the "entityType:id"
+	// compound form for it (see reconstructRefValues' own doc comment)
+	// rather than only working for fields refTargets already covers.
+	// Most of this session's own CRM schema declares `{"format":"ref"}`
+	// with no target at all (confirmed directly against the real
+	// schema, not assumed) — refTargets alone leaves the grid's REF
+	// columns for exactly those fields unusable, which the schema-
+	// declared/remembered-target path above doesn't reach.
+	refFieldNames := make(map[string]bool)
+	if schema != nil {
+		for _, f := range schema.Fields {
+			if f.Format == "ref" || f.Type == "ref" {
+				refFieldNames[f.Name] = true
+			}
+		}
+	}
+
 	results := make([]gridSaveResult, len(rows))
 	for i, row := range rows {
-		if _, err := c.Patch(r.Context(), entityType, row.ID, row.Changes); err != nil {
+		changes, newlyLearned, convErr := reconstructRefValues(row.Changes, refTargets, refFieldNames)
+		if convErr != nil {
+			results[i] = gridSaveResult{ID: row.ID, Success: false, Message: convErr.Error()}
+			continue
+		}
+		if _, err := c.Patch(r.Context(), entityType, row.ID, changes); err != nil {
 			results[i] = gridSaveResult{ID: row.ID, Success: false, Message: err.Error()}
 			continue
 		}
 		results[i] = gridSaveResult{ID: row.ID, Success: true}
+		// Best-effort, same as the entity form's own remember step —
+		// a failure here just means the next grid edit to this field
+		// needs the compound form again too, not a reason to fail a
+		// save that already genuinely succeeded.
+		for field, target := range newlyLearned {
+			_ = fieldmeta.RememberRefTarget(r.Context(), c, entityType, field, target)
+			refTargets[field] = target // so later rows in this same batch benefit immediately too
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(results)
+}
+
+// reconstructRefValues rewrites any changed field that's a known REF
+// field from the grid's own raw submitted value into the structured
+// {"type":"REF","entity":target,"id":N} shape xolu's write path
+// requires — the identical shape formengine.ParseFormValues already
+// builds for the entity form, applied here to the grid's differently-
+// shaped input (a decoded JSON map of raw values, not a url.Values
+// form submission) rather than routed through ParseFormValues itself,
+// which expects the latter. Fields not in refFieldNames pass through
+// completely unchanged — this never touches a non-REF field's value.
+//
+// Two cases for a recognized REF field:
+//   - refTargets already knows the target (schema-declared or
+//     previously remembered): the raw value is a plain ID.
+//   - refTargets doesn't know it (confirmed the common case for this
+//     session's own CRM schema — most REF fields declare
+//     {"format":"ref"} with no "target" at all): the grid's single
+//     text-input cell editor has no companion field the way the
+//     entity form does, so the raw value is expected as the compound
+//     "entityType:id" form instead (e.g. "users:5"). Returned via
+//     newlyLearned so the caller can remember it (fieldmeta.
+//     RememberRefTarget) for every future edit to this field —
+//     exactly the entity form's own behavior, just triggered from a
+//     different input shape.
+func reconstructRefValues(changes map[string]any, refTargets map[string]string, refFieldNames map[string]bool) (out map[string]any, newlyLearned map[string]string, err error) {
+	if len(refFieldNames) == 0 {
+		return changes, nil, nil
+	}
+	out = make(map[string]any, len(changes))
+	for field, raw := range changes {
+		if !refFieldNames[field] {
+			out[field] = raw
+			continue
+		}
+		if target, known := refTargets[field]; known {
+			id, convErr := coerceToInt64(raw)
+			if convErr != nil {
+				return nil, nil, fmt.Errorf("%s: must be a valid ID, got %v", field, raw)
+			}
+			out[field] = map[string]any{"type": "REF", "entity": target, "id": id}
+			continue
+		}
+		// Target unknown — require the compound form.
+		s, ok := raw.(string)
+		target, idStr, found := "", "", false
+		if ok {
+			target, idStr, found = strings.Cut(s, ":")
+		}
+		if !found || target == "" || idStr == "" {
+			return nil, nil, fmt.Errorf(
+				"%s: target entity type unknown for this field — type \"entityType:id\" (e.g. \"users:5\") once, and every later edit to this field only needs the plain ID", field)
+		}
+		id, convErr := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+		if convErr != nil {
+			return nil, nil, fmt.Errorf("%s: %q is not a valid ID", field, idStr)
+		}
+		out[field] = map[string]any{"type": "REF", "entity": target, "id": id}
+		if newlyLearned == nil {
+			newlyLearned = map[string]string{}
+		}
+		newlyLearned[field] = target
+	}
+	return out, newlyLearned, nil
+}
+
+// coerceToInt64 accepts either shape Tabulator could plausibly send
+// for a cell whose editor is a plain text input: a JSON number
+// (float64, since encoding/json decodes all JSON numbers that way) or
+// a numeric string.
+func coerceToInt64(v any) (int64, error) {
+	switch t := v.(type) {
+	case float64:
+		return int64(t), nil
+	case string:
+		return strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+	default:
+		return 0, fmt.Errorf("unsupported value type %T", v)
+	}
 }
 
 // writeJSONError writes a JSON-shaped error for the grid's AJAX

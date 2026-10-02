@@ -198,12 +198,44 @@ func TestPreviewFields_ExcludesObjectAndArray(t *testing.T) {
 	got := previewFields(fields)
 
 	if len(got) != 2 {
-		t.Fatalf("previewFields = %v, want exactly title and count (object/array excluded)", got)
+		t.Fatalf("previewFields = %v, want exactly title and count (genuine object/array excluded)", got)
 	}
 	for _, f := range got {
 		if f.Type == "object" || f.Type == "array" {
 			t.Fatalf("previewFields included a %s field, want none", f.Type)
 		}
+	}
+}
+
+func TestPreviewFields_IncludesRefFormattedFields(t *testing.T) {
+	// A REF field's own JSON Schema Type is "object" (confirmed
+	// directly against a real schema: {"type":"object","format":"ref"})
+	// — the object-exclusion rule above must not sweep these up too,
+	// since the list row renderer has its own, correct handling for
+	// them (RefJumpButton) that a blanket exclusion here silently
+	// prevented from ever running in practice.
+	fields := []xclient.FieldDef{
+		{Name: "title", Type: "string"},
+		{Name: "owner", Type: "object", Format: "ref"},
+		{Name: "metadata", Type: "object"}, // genuine object, still excluded
+		{Name: "tags", Type: "array"},
+	}
+	got := previewFields(fields)
+
+	if len(got) != 2 {
+		t.Fatalf("previewFields = %+v, want exactly title and owner", got)
+	}
+	foundOwner := false
+	for _, f := range got {
+		if f.Name == "metadata" || f.Name == "tags" {
+			t.Fatalf("previewFields included %q, want genuine object/array fields still excluded", f.Name)
+		}
+		if f.Name == "owner" {
+			foundOwner = true
+		}
+	}
+	if !foundOwner {
+		t.Fatal("previewFields excluded the REF-formatted \"owner\" field, want it included")
 	}
 }
 
@@ -835,6 +867,57 @@ func TestEntitiesHandler_Show_RefFieldRendersAsLinkInPreview(t *testing.T) {
 	}
 	if !strings.Contains(body, ">7<") {
 		t.Fatalf("body missing the raw ID as link text (no label resolution in the list view — N+1 concern): %s", body)
+	}
+}
+
+func TestEntitiesHandler_Show_RefFieldWithUnknownTargetShowsLabelNotClickableLink(t *testing.T) {
+	// The real, confirmed-common case (this session's own CRM example
+	// schema declares most REF fields exactly this way): no "target"
+	// extension at all. Before this was fixed, the cell fell through
+	// to previewValue's default case, which had no real handling for a
+	// raw map and rendered Go's own %v formatting straight into the
+	// page — confirmed directly against a live server: a cell read
+	// literally "map[entity:companies id:13 type:REF]". The fix: still
+	// show a readable id/label via refValueInfo, just without a
+	// clickable link, since a link needs the target entity type this
+	// field doesn't have.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/schema/contacts", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"title": map[string]any{"type": "string"}, "company": map[string]any{"type": "object", "format": "ref"}},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/contacts", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":       []map[string]any{{"id": float64(1), "title": "COO", "company": map[string]any{"type": "REF", "entity": "companies", "id": float64(13)}}},
+			"pagination": map[string]any{"page": 1, "per_page": 25, "total_items": 1, "total_pages": 1},
+		})
+	})
+	mux.HandleFunc("GET /api/v1/xoluman_field_meta", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total_pages": 1}})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	store := seedConnection(t, server.URL)
+	h := NewEntitiesHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/connections/test/entities/contacts", nil)
+	req.SetPathValue("name", "test")
+	req.SetPathValue("type", "contacts")
+	rec := httptest.NewRecorder()
+
+	h.Show(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "map[entity:") || strings.Contains(body, "type:REF") {
+		t.Fatalf("body leaked Go's raw map formatting instead of a readable value: %s", body)
+	}
+	if !strings.Contains(body, ">13<") {
+		t.Fatalf("body missing the readable id 13 for the unresolved-target ref field: %s", body)
+	}
+	if strings.Contains(body, `href="/connections/test/entities/companies/13/edit"`) {
+		t.Fatalf("body has a clickable link despite the target entity type being unknown — should show a label only: %s", body)
 	}
 }
 

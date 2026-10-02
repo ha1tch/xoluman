@@ -50,6 +50,8 @@ import (
 	"strconv"
 
 	fsmtk "github.com/ha1tch/fsm-toolkit/pkg/fsm"
+	fsmfile "github.com/ha1tch/fsm-toolkit/pkg/fsmfile"
+	latex "github.com/ha1tch/fsm-toolkit/pkg/latex"
 	mi "github.com/ha1tch/minty"
 	xclient "github.com/ha1tch/xolu/pkg/client"
 
@@ -201,6 +203,9 @@ func RegisterFSMModule(reg *modules.Registry, store connstore.Store) {
 			mux.HandleFunc("DELETE /connections/{name}/fsm/{id}", h.Delete)
 			mux.HandleFunc("POST /connections/{name}/fsm/validate", h.ValidateLocal)
 			mux.HandleFunc("PUT /connections/{name}/fsm/{id}/layout", h.SaveLayout)
+			mux.HandleFunc("GET /connections/{name}/fsm/{id}/export/svg", h.ExportSVG)
+			mux.HandleFunc("GET /connections/{name}/fsm/{id}/export/png", h.ExportPNG)
+			mux.HandleFunc("GET /connections/{name}/fsm/{id}/export/latex", h.ExportLaTeX)
 		},
 	})
 }
@@ -387,11 +392,11 @@ func (h *fsmHandler) GetData(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *fsmHandler) loadLayout(ctx context.Context, c *xclient.Client, defID int64) *fsmLayout {
-	result, err := c.List(ctx, fsmLayoutEntityType, &xclient.ListParams{Limit: 1000})
+	entities, err := xoluext.ListAll(ctx, c, fsmLayoutEntityType)
 	if err != nil {
 		return nil // no layout saved yet (or entity type doesn't exist), not an error the caller needs to see
 	}
-	for _, e := range result.Entities {
+	for _, e := range entities {
 		id, _ := e.Data["definition_id"].(float64)
 		if int64(id) != defID {
 			continue
@@ -543,8 +548,8 @@ func (h *fsmHandler) SaveLayout(w http.ResponseWriter, r *http.Request) {
 		layout.Version = 1
 	}
 
-	if result, err := c.List(r.Context(), fsmLayoutEntityType, &xclient.ListParams{Limit: 1000}); err == nil {
-		for _, e := range result.Entities {
+	if entities, err := xoluext.ListAll(r.Context(), c, fsmLayoutEntityType); err == nil {
+		for _, e := range entities {
 			existingID, _ := e.Data["definition_id"].(float64)
 			if int64(existingID) == id {
 				_ = c.Delete(r.Context(), fsmLayoutEntityType, e.ID) // best-effort — a stale row left behind is a minor future confusion, not worth failing the save over
@@ -561,4 +566,141 @@ func (h *fsmHandler) SaveLayout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── export ─────────────────────────────────────────────────────────────
+//
+// Three formats, all built on fsm-toolkit's own exporters
+// (pkg/fsmfile's GenerateSVGNative/RenderPNG, pkg/latex's
+// GenerateLaTeX) rather than anything xoluman invents itself — the
+// same fsmToolkitFSM bridge this file already uses for validation
+// converts the def once, shared by all three formats below.
+//
+// One real distinction worth being explicit about, not papered over:
+// SVG and PNG run fsm-toolkit's own SmartLayout internally and always
+// have — they auto-position states fresh every time, never reading
+// this file's own saved fsmLayout at all. LaTeX is different by
+// design (see pkg/latex's own package doc comment): it runs no
+// layout of its own, so it renders exactly the arrangement saved via
+// SaveLayout — the actual diagram a person built in the editor, not a
+// re-derived one. A machine with no saved layout yet has nothing for
+// LaTeX to render faithfully, so that path returns a clear, actionable
+// error instead of fabricating positions that wouldn't match what's
+// actually on screen.
+
+// loadForExport fetches a machine def and converts it via
+// fsmToolkitFSM — the one piece every export format needs regardless
+// of which one was requested.
+func (h *fsmHandler) loadForExport(w http.ResponseWriter, r *http.Request, name string, id int64) (*fsmtk.FSM, *xclient.Client, bool) {
+	c, err := h.clientFor(r, name)
+	if err != nil {
+		if errors.Is(err, connstore.ErrNotFound) {
+			writeConnectionNotFound(w, name)
+			return nil, nil, false
+		}
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return nil, nil, false
+	}
+	def, err := c.GetMachineDef(r.Context(), id)
+	if err != nil {
+		writeUpstreamError(w, name, r.URL.Path, err)
+		return nil, nil, false
+	}
+	f, _, err := fsmToolkitFSM(def.Spec)
+	if err != nil {
+		http.Error(w, "cannot convert this machine for export: "+err.Error(), http.StatusUnprocessableEntity)
+		return nil, nil, false
+	}
+	return f, c, true
+}
+
+func (h *fsmHandler) ExportSVG(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	f, _, ok := h.loadForExport(w, r, name, id)
+	if !ok {
+		return
+	}
+	svg := fsmfile.GenerateSVGNative(f, fsmfile.DefaultSVGOptions())
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.svg"`, sanitizeFilename(f.Name)))
+	_, _ = w.Write([]byte(svg))
+}
+
+func (h *fsmHandler) ExportPNG(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	f, _, ok := h.loadForExport(w, r, name, id)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.png"`, sanitizeFilename(f.Name)))
+	if err := fsmfile.RenderPNG(f, w, fsmfile.DefaultPNGOptions()); err != nil {
+		// Headers are already sent at this point (streaming render) —
+		// nothing more this handler can do for the person but log it
+		// isn't silently ignored either; a truncated/corrupt PNG on
+		// the wire is the honest symptom of whatever failed here.
+		writeUpstreamErrorJSON(w, err)
+	}
+}
+
+func (h *fsmHandler) ExportLaTeX(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	f, c, ok := h.loadForExport(w, r, name, id)
+	if !ok {
+		return
+	}
+	layout := h.loadLayout(r.Context(), c, id)
+	if layout == nil || len(layout.States) == 0 {
+		http.Error(w, "no saved layout for this machine yet — open it in the editor, arrange it, and save before exporting to LaTeX", http.StatusUnprocessableEntity)
+		return
+	}
+	positions := make(map[string]latex.Position, len(layout.States))
+	for stateName, sl := range layout.States {
+		positions[stateName] = latex.Position{X: float64(sl.X), Y: float64(sl.Y)}
+	}
+	doc, err := latex.GenerateLaTeX(f, positions, nil, latex.DefaultOptions())
+	if err != nil {
+		http.Error(w, "LaTeX export failed: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-tex")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.tex"`, sanitizeFilename(f.Name)))
+	_, _ = w.Write([]byte(doc))
+}
+
+// sanitizeFilename keeps a machine's own name usable as a downloaded
+// file's base name — letters, digits, hyphen, underscore only;
+// everything else (spaces, slashes, anything that could be read as a
+// path segment) becomes an underscore. Falls back to a fixed name
+// when the result would otherwise be empty (an unnamed machine, or
+// one whose name is entirely punctuation).
+func sanitizeFilename(name string) string {
+	var b []byte
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b = append(b, byte(r))
+		default:
+			b = append(b, '_')
+		}
+	}
+	if len(b) == 0 {
+		return "machine"
+	}
+	return string(b)
 }

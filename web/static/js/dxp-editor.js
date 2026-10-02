@@ -40,6 +40,24 @@ class XoluDxpEditor extends LitElement {
     // editor's own saved queries use, filtered to mode=dxp.
     presetsUrl: { attribute: 'presets-url' },
     presetRunUrl: { attribute: 'preset-run-url' },
+    // Every field below drives something in render() — undeclared,
+    // Lit never re-renders when any of them change (the same root
+    // cause found and fixed in query-editor.js's own save form; the
+    // whole picker/run/preset flow here has the identical bug).
+    _defs: { state: true },
+    _selectedDefId: { state: true },
+    _defDetail: { state: true },
+    _bindingValues: { state: true },
+    _running: { state: true },
+    _result: { state: true },
+    _error: { state: true },
+    _loadingDef: { state: true },
+    _presets: { state: true },
+    _selectedPreset: { state: true },
+    _presetFormValues: { state: true },
+    _runningPreset: { state: true },
+    _presetResult: { state: true },
+    _presetError: { state: true },
   };
 
   // Light DOM — same reasoning as grid-editor.js/query-editor.js: no

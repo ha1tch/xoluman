@@ -147,3 +147,61 @@ func TestSaveSettingsFilePermissions(t *testing.T) {
 		t.Fatalf("settings.json permissions = %o, want 0600", perm)
 	}
 }
+
+func TestDefaultSettings_SeedFieldsAreSafeByDefault(t *testing.T) {
+	s := DefaultSettings()
+	if s.SeedSkipEmptyCheck {
+		t.Error("SeedSkipEmptyCheck = true by default, want false (the empty check must run unless explicitly opted out)")
+	}
+	if s.SeedAllowRemoteSources {
+		t.Error("SeedAllowRemoteSources = true by default, want false (remote seed sources are opt-in only)")
+	}
+}
+
+// TestLoad_PreExistingSettingsFileWithoutSeedFieldsStaysSafe is the
+// specific regression this design exists to prevent: a settings.json
+// written before the seed-system fields existed (no "seed_skip_empty_
+// check" or "seed_allow_remote_sources" key at all) must decode to
+// the SAFE state for both — the check runs, remote sources stay off —
+// never silently to the unsafe state. This is exactly why both fields
+// are oriented so their zero value is the safe one; a naive
+// "RequireEmptyConnection: true by default" field would fail this
+// exact test, decoding to false (unsafe) for a file like this one.
+func TestLoad_PreExistingSettingsFileWithoutSeedFieldsStaysSafe(t *testing.T) {
+	dir := withConfigDir(t)
+	oldFileContent := `{"secret_backend":"file"}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(oldFileContent), 0o600); err != nil {
+		t.Fatalf("writing pre-existing settings.json: %v", err)
+	}
+
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.SeedSkipEmptyCheck {
+		t.Error("SeedSkipEmptyCheck = true after loading a settings.json that predates this field, want false (safe)")
+	}
+	if s.SeedAllowRemoteSources {
+		t.Error("SeedAllowRemoteSources = true after loading a settings.json that predates this field, want false (safe)")
+	}
+}
+
+func TestSeedSettings_RoundTrip(t *testing.T) {
+	withConfigDir(t)
+	want := Settings{
+		SecretBackend:          SecretBackendFile,
+		SeedsDir:               "/some/path/to/seeds",
+		SeedSkipEmptyCheck:     true,
+		SeedAllowRemoteSources: true,
+	}
+	if err := Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}

@@ -32,6 +32,36 @@ const MODES = ['oql', 'sulpher', 'rest'];
 class XoluQueryEditor extends LitElement {
   static properties = {
     runUrl: { attribute: 'run-url' },
+    // modes restricts which of the three query modes this instance
+    // shows tabs for — a comma-separated subset of MODES, e.g.
+    // "oql,rest" on the query view (query.go's own /query page) or
+    // "sulpher" alone on the graph view (query.go's own GraphView),
+    // since the graph view's own Sulpher tab has no use for OQL/REST
+    // at all. Unset (the default) means all three, matching this
+    // component's own original, single-page behavior.
+    modes: {},
+    // Every one of these drives something in render() — without a
+    // declared reactive property, Lit has no way to know any of them
+    // changed, and a plain `this._x = y` assignment silently does
+    // nothing visible at all. Confirmed the hard way: clicking "Save…"
+    // set _showSaveForm to true correctly (the assignment itself
+    // works fine), but nothing on screen ever changed, because Lit
+    // never re-rendered — the actual, root cause of "saved queries
+    // don't work," found by testing the real UI click flow directly
+    // rather than only the server-side save endpoint in isolation.
+    _mode: { state: true },
+    _running: { state: true },
+    _result: { state: true },
+    _resultParsed: { state: true },
+    _resultViewMode: { state: true },
+    _error: { state: true },
+    _recentByMode: { state: true },
+    _savedByMode: { state: true },
+    _showSaveForm: { state: true },
+    _saveNameDraft: { state: true },
+    _selectedSavedId: { state: true },
+    _restMethod: { state: true },
+    _restPath: { state: true },
   };
 
   // Light DOM — CodeMirror renders real DOM nodes into whatever
@@ -41,11 +71,25 @@ class XoluQueryEditor extends LitElement {
     return this;
   }
 
+  // _activeModes is the subset of MODES this instance actually shows
+  // tabs for — see the modes property's own doc comment. Falls back
+  // to every mode when the attribute is unset, matching this
+  // component's original, single-page behavior before it was reused
+  // on the graph view too.
+  get _activeModes() {
+    if (!this.modes) return MODES;
+    const requested = this.modes.split(',').map((m) => m.trim()).filter(Boolean);
+    const active = MODES.filter((m) => requested.includes(m));
+    return active.length > 0 ? active : MODES;
+  }
+
   constructor() {
     super();
     this._mode = 'oql';
     this._running = false;
     this._result = null;
+    this._resultParsed = null;
+    this._resultViewMode = 'raw';
     this._error = null;
     this._languageConf = new Compartment();
     // Same live-reactivity reasoning theme.js's toggle button needs
@@ -92,6 +136,9 @@ class XoluQueryEditor extends LitElement {
   }
 
   firstUpdated() {
+    if (!this._activeModes.includes(this._mode)) {
+      this._mode = this._activeModes[0];
+    }
     this._editorHost = document.createElement('div');
     this._editorHost.className = 'xolu-query-editor-host';
     this.querySelector('.xolu-query-editor-mount').appendChild(this._editorHost);
@@ -107,6 +154,29 @@ class XoluQueryEditor extends LitElement {
       }),
       parent: this._editorHost,
     });
+    // @neo4j-cypher/codemirror's own cypherExtensions (via getExtensions)
+    // includes a lint source that calls view.newContentVersion() —
+    // confirmed directly against the real, unminified package source
+    // (es/codemirror.js): this method is never provided by
+    // getExtensions() itself, only by the package's own separate,
+    // higher-level createCypherEditor() helper, which attaches it to
+    // the EditorView it creates internally as exactly this same
+    // version-counter closure. Using getExtensions() directly (as this
+    // component does, for the same Compartment-based reconfiguration
+    // the OQL/REST modes already need) means completing that same
+    // attachment ourselves — without it, the lint source throws
+    // "newContentVersion is not a function" the first time it runs
+    // (on a debounced timer after any doc change, not only on Run;
+    // confirmed by reproducing it from typing alone with no Run click
+    // at all). Attached once, unconditionally, regardless of which
+    // language mode is active — harmless for OQL/REST, and persists
+    // correctly across _setMode's own setState calls since those keep
+    // the same EditorView instance.
+    this._view.version = 1;
+    this._view.newContentVersion = function () {
+      this.version += 1;
+      return this.version;
+    };
 
     this._themeObserver = new MutationObserver(() => {
       this._view.dispatch({ effects: this._themeConf.reconfigure(this._themeExtensionFor()) });
@@ -287,6 +357,8 @@ class XoluQueryEditor extends LitElement {
     this._docs[this._mode] = this._view.state.doc.toString();
     this._mode = mode;
     this._result = null;
+    this._resultParsed = null;
+    this._resultViewMode = 'raw';
     this._error = null;
     this._showSaveForm = false;
     this._saveNameDraft = '';
@@ -309,6 +381,8 @@ class XoluQueryEditor extends LitElement {
     if (this._running || !this._view) return;
     this._running = true;
     this._error = null;
+    this._resultParsed = null;
+    this._resultViewMode = 'raw';
     this.requestUpdate();
 
     const query = this._view.state.doc.toString();
@@ -334,7 +408,9 @@ class XoluQueryEditor extends LitElement {
         this._error = text || `HTTP ${resp.status}`;
       } else {
         try {
-          this._result = JSON.stringify(JSON.parse(text), null, 2);
+          const parsed = JSON.parse(text);
+          this._resultParsed = parsed;
+          this._result = JSON.stringify(parsed, null, 2);
         } catch {
           this._result = text;
         }
@@ -345,6 +421,82 @@ class XoluQueryEditor extends LitElement {
       this._running = false;
       this.requestUpdate();
     }
+  }
+
+  // _entitiesUrlFor derives the real entity list/grid page's own URL
+  // from runUrl ("/connections/{name}/query/run"), the same string-
+  // derivation convention this component already uses for savedQueriesUrl
+  // and its own localStorage key. Only ever called when the OQL
+  // classifier (server-side, internal/oqlclassify) has already
+  // confirmed a query is a genuine simple select — this is where the
+  // live-editable grid for a table actually lives, not a new view
+  // built for this feature.
+  _entitiesUrlFor(table) {
+    return this.runUrl.replace(/\/query\/run$/, '/entities/' + encodeURIComponent(table));
+  }
+
+  // _viewInGraph is the Sulpher tab's own bridge to the graph-walker
+  // tab living beside it on the same page (query.go's own GraphView,
+  // not this component's own concern how the two tabs are switched or
+  // laid out) — dispatches a plain DOM event carrying the already-
+  // classified {nodes, edges} (see internal/ui/query.go's own
+  // classifySulpherResult, shared with the dormant standalone
+  // endpoint) rather than re-classifying client-side, since the
+  // server already did that work once. bubbles+composed so a page-
+  // level listener catches it regardless of exactly where in the DOM
+  // this component sits; light DOM here anyway (createRenderRoot
+  // returns this), so composed doesn't strictly matter, but it's
+  // correct regardless of that implementation detail.
+  _viewInGraph() {
+    if (!this._resultParsed || !this._resultParsed.graphData) return;
+    this.dispatchEvent(
+      new CustomEvent('xolu-view-in-graph', {
+        detail: this._resultParsed.graphData,
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  // _renderResultTable builds a plain, read-only <table> from an OQL
+  // result's own data rows — the generic "view as table" path for any
+  // query shape that isn't a simple select (a JOIN, an aggregate, an
+  // explicit field list), where routing to the live-editable entity
+  // grid isn't safe (see oqlclassify's own doc comment for why).
+  // Deliberately not editable: these rows don't correspond to a
+  // single, complete, real record a PATCH could safely target.
+  _renderResultTable(rows) {
+    if (!rows || rows.length === 0) {
+      return html`<div class="xolu-query-result-empty">No rows.</div>`;
+    }
+    const columns = [];
+    const seen = new Set();
+    for (const row of rows) {
+      for (const key of Object.keys(row)) {
+        if (!seen.has(key)) {
+          seen.add(key);
+          columns.push(key);
+        }
+      }
+    }
+    return html`
+      <table class="xolu-query-result-table">
+        <thead>
+          <tr>${columns.map((c) => html`<th>${c}</th>`)}</tr>
+        </thead>
+        <tbody>
+          ${rows.map(
+            (row) => html`<tr>${columns.map((c) => html`<td>${this._cellText(row[c])}</td>`)}</tr>`
+          )}
+        </tbody>
+      </table>
+    `;
+  }
+
+  _cellText(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
   }
 
   render() {
@@ -406,17 +558,31 @@ class XoluQueryEditor extends LitElement {
         .dark .xolu-query-save-confirm:disabled { background: #4338ca; color: #c7d2fe; }
         .xolu-query-result { margin-top: 1rem; padding: 0.75rem; background: #f9fafb; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; max-height: 400px; overflow: auto; color: #111827; }
         .dark .xolu-query-result { background: #1f2937; color: #f3f4f6; }
+        .xolu-query-result-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }
+        .xolu-query-view-toggle { padding: 0.35rem 0.75rem; font-size: 0.8125rem; border-radius: 0.375rem; border: 1px solid #d1d5db; background: #fff; cursor: pointer; }
+        .dark .xolu-query-view-toggle { border-color: #4b5563; background: #1f2937; color: #f3f4f6; }
+        .xolu-query-edit-grid-link { font-size: 0.8125rem; color: #4f46e5; text-decoration: none; }
+        .xolu-query-edit-grid-link:hover { text-decoration: underline; }
+        .xolu-query-view-graph-btn { padding: 0.35rem 0.75rem; font-size: 0.8125rem; border-radius: 0.375rem; border: 1px solid #4f46e5; background: #4f46e5; color: #fff; cursor: pointer; }
+        .xolu-query-result-table { margin-top: 0; width: 100%; border-collapse: collapse; font-size: 0.8125rem; max-height: 400px; display: block; overflow: auto; }
+        .xolu-query-result-table th, .xolu-query-result-table td { padding: 0.4rem 0.6rem; border: 1px solid #e5e7eb; text-align: left; white-space: nowrap; }
+        .xolu-query-result-table th { background: #f9fafb; font-weight: 600; position: sticky; top: 0; }
+        .dark .xolu-query-result-table th, .dark .xolu-query-result-table td { border-color: #374151; }
+        .dark .xolu-query-result-table th { background: #1f2937; }
+        .xolu-query-result-empty { margin-top: 1rem; font-size: 0.8125rem; color: #6b7280; }
         .xolu-query-error { margin-top: 1rem; padding: 0.75rem; background: #fef2f2; color: #b91c1c; border-radius: 0.5rem; font-family: monospace; font-size: 0.8125rem; white-space: pre-wrap; }
         .dark .xolu-query-error { background: rgba(127, 29, 29, 0.3); color: #f87171; }
       </style>
       <div class="xolu-query-tabs">
-        ${MODES.map(
-          (m) => html`
-            <div class="xolu-query-tab ${m === this._mode ? 'active' : ''}" @click=${() => this._setMode(m)}>
-              ${m.toUpperCase()}
-            </div>
-          `
-        )}
+        ${this._activeModes.length > 1
+          ? this._activeModes.map(
+              (m) => html`
+                <div class="xolu-query-tab ${m === this._mode ? 'active' : ''}" @click=${() => this._setMode(m)}>
+                  ${m.toUpperCase()}
+                </div>
+              `
+            )
+          : ''}
       </div>
       <div class="xolu-query-history-row">
         <select
@@ -502,7 +668,38 @@ class XoluQueryEditor extends LitElement {
           : ''}
       </div>
       ${this._error ? html`<div class="xolu-query-error">${this._error}</div>` : ''}
-      ${this._result ? html`<div class="xolu-query-result">${this._result}</div>` : ''}
+      ${this._resultParsed && this._mode === 'oql' && Array.isArray(this._resultParsed.data) && this._resultParsed.data.length > 0
+        ? html`
+            <div class="xolu-query-result-actions">
+              <button
+                class="xolu-query-view-toggle"
+                @click=${() => (this._resultViewMode = this._resultViewMode === 'table' ? 'raw' : 'table')}>
+                ${this._resultViewMode === 'table' ? 'View as JSON' : 'View as table'}
+              </button>
+              ${this._resultParsed.classification && this._resultParsed.classification.isSimpleSelect
+                ? html`
+                    <a class="xolu-query-edit-grid-link" href=${this._entitiesUrlFor(this._resultParsed.classification.sourceTable)}>
+                      Open ${this._resultParsed.classification.sourceTable} as an editable table →
+                    </a>
+                  `
+                : ''}
+            </div>
+          `
+        : ''}
+      ${this._resultParsed && this._mode === 'sulpher' && this._resultParsed.graphData && this._resultParsed.graphData.nodes && this._resultParsed.graphData.nodes.length > 0
+        ? html`
+            <div class="xolu-query-result-actions">
+              <button class="xolu-query-view-graph-btn" @click=${this._viewInGraph}>
+                View in graph →
+              </button>
+            </div>
+          `
+        : ''}
+      ${this._result
+        ? this._resultViewMode === 'table' && this._resultParsed
+          ? this._renderResultTable(this._resultParsed.data)
+          : html`<div class="xolu-query-result">${this._result}</div>`
+        : ''}
     `;
   }
 }

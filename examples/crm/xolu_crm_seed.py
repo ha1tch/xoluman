@@ -588,18 +588,33 @@ SAVED_QUERIES = [
     },
     {
         "mode": "oql", "name": "Deals by owner and stage",
-        # Deliberately no CASE expression and no JOIN here -- both
-        # were tried first and both are real, current OQL limitations,
-        # not assumptions: CASE silently returns null in every
-        # aggregate column rather than erroring (confirmed directly,
-        # not inferred from docs), and JOIN has two real, narrow bugs
-        # against a live tenant (see oql-join-bugs-report.md) -- a
-        # missing tenant_id column in generated JOIN SQL, and JOIN+LIMIT
-        # parsed as two statements. A plain multi-column GROUP BY
-        # sidesteps both; the two queries below get the cross-table
-        # data OQL's JOIN currently can't, via Sulpher instead.
+        # No CASE expression here -- a real, current OQL limitation,
+        # not an assumption: CASE silently returns null in every
+        # aggregate column rather than erroring (confirmed directly).
+        # JOIN itself is fine now (xolu fixed the tenant_id bug this
+        # query used to sidestep -- see "Deals with their company's
+        # industry" below for a real JOIN query), but aggregate
+        # functions still aren't supported in a JOIN's SELECT list
+        # ("unsupported expression type in JOIN SELECT: *ast.FunctionCall",
+        # confirmed directly) -- so "Average deal size by company
+        # industry" below still uses the Sulpher rewrite, not OQL.
         "query": "SELECT owner, stage, COUNT(*) AS cnt, SUM(amount) AS total_value "
                  "FROM deals GROUP BY owner, stage ORDER BY owner",
+    },
+    {
+        "mode": "oql", "name": "Deals with their company's industry",
+        # A real JOIN query -- xolu fixed the tenant_id bug (a copy-
+        # paste error in the generated SQL's tenant-scoping predicate,
+        # confirmed via their own changelog and independently re-
+        # verified here) that used to make any JOIN against a real
+        # tenant-scoped instance fail outright. company.id, not bare
+        # company -- deals.company is a REF field (a structured
+        # object, {entity, id, type}), not a bare foreign key, so the
+        # join condition has to reach into the REF's own id.
+        "query": "SELECT TOP 10 a.name AS deal_name, a.amount, a.stage, "
+                 "b.name AS company_name, b.industry "
+                 "FROM deals AS a INNER JOIN companies AS b ON a.company.id = b.id "
+                 "ORDER BY a.amount DESC",
     },
     {
         "mode": "oql", "name": "Task completion by owner",

@@ -32,6 +32,14 @@ class XoluGridEditor extends LitElement {
   static properties = {
     dataUrl: { attribute: 'data-url' },
     saveUrl: { attribute: 'save-url' },
+    // _dirty/_saving drive render() (unsaved-changes indicator, save
+    // button state) — undeclared, the same missing-reactivity bug
+    // found and fixed in query-editor.js/dxp-editor.js applies here
+    // too. _lastResults/_table/_gridEl are internal plumbing Tabulator
+    // itself manages directly, never read inside render(), correctly
+    // left undeclared.
+    _dirty: { state: true },
+    _saving: { state: true },
   };
 
   // Light DOM: see file header. Tabulator's stylesheet is a normal

@@ -203,7 +203,24 @@ class XoluFsmEditor extends LitElement {
     // (read-only Sulpher-query visualization, click-to-inspect).
     mode: { type: String },
     graphUrl: { attribute: 'graph-url' },
+    graphEntityTypesUrl: { attribute: 'graph-entity-types-url' },
+    entitiesBaseUrl: { attribute: 'entities-base-url' },
+    // The FSM's own name/description fields — found missing while
+    // auditing every component in this file against the same
+    // undeclared-reactive-property bug found in query-editor.js and
+    // dxp-editor.js. Being controlled inputs (.value=${this._name}),
+    // a render triggered by an unrelated reactive property (e.g.
+    // _validation updating mid-typing) could otherwise reset the
+    // visible field to a stale value even though the underlying
+    // assignment itself was never broken.
+    _name: { state: true },
+    _description: { state: true },
+    _determinism: { state: true },
+    _graphEntityType: { state: true },
+    _graphDepth: { state: true },
+    _graphEntityTypeOptions: { state: true },
     _dark: { state: true },
+    _maximized: { state: true },
     _saving: { state: true },
     _error: { state: true },
     _validation: { state: true },
@@ -229,8 +246,11 @@ class XoluFsmEditor extends LitElement {
     this._validateTimer = null;
     this._layoutSaveTimer = null;
     this._dark = document.documentElement.classList.contains('dark');
+    this._maximized = false;
     this.mode = 'fsm';
-    this._graphQuery = '';
+    this._graphEntityType = '';
+    this._graphDepth = 1;
+    this._graphEntityTypeOptions = [];
     this._graphLoading = false;
     this._inspecting = null; // {kind: 'node'|'edge', label, data}
     this._inspectEdits = {};
@@ -250,6 +270,135 @@ class XoluFsmEditor extends LitElement {
     };
 
     initFSM(canvas);
+
+    // Intercept the halo gesture specifically for graph mode. The
+    // engine's own halo click (canvas.onmousedown, just set up by
+    // initFSM above) has no mode awareness at all, and its default
+    // behavior is actively broken here, confirmed directly: left-
+    // click-halo silently created a fake, unpersisted Link between
+    // two real graph entities; right-click-halo (add-linked-node)
+    // created a brand-new Node with no _graphNode at all. Right-click-
+    // halo is repurposed as the fast path for the same expand/
+    // collapse the inspect panel's own "Expand" button already
+    // offers — a toggle: collapsed -> expand, anything else ->
+    // collapse. Left-click-halo is suppressed entirely in graph mode:
+    // there's no xoluman feature yet for "create a new, real REF
+    // relationship between two entities" for it to mean.
+    const origMouseDown = canvas.onmousedown;
+    canvas.onmousedown = (e) => {
+      if (this.mode === 'graph' && typeof _haloNode !== 'undefined' && _haloNode != null && _haloVisible && !e.shiftKey) {
+        const target = _haloNode;
+        if (e.button === 2) {
+          _haloNode = null;
+          _haloVisible = false;
+          _haloOpacity = 0;
+          _haloTarget = 0;
+          if (target._graphNode && target._graphNode.collapsed) {
+            this._expandNode(target);
+          } else {
+            this._collapseNode(target);
+          }
+          if (typeof draw === 'function') draw();
+          return false;
+        }
+        // Left-click-halo: starts a real edge-creation drag, but only
+        // from a node whose own REF fields are actually known — a
+        // collapsed node's data is just {id}, nothing to offer as a
+        // drag candidate, and a draft node has no REF fields at all
+        // (no schema assigned yet). Otherwise let the engine's own
+        // halo-click logic run as normal (starts the same
+        // TemporaryLink drag visual FSM mode already uses) — only the
+        // completion, in the onmouseup wrap below, differs for graph
+        // mode: no fake local Link ever gets pushed to links[].
+        if (!target._graphNode || target._graphNode.collapsed) {
+          _haloNode = null;
+          _haloVisible = false;
+          _haloOpacity = 0;
+          _haloTarget = 0;
+          if (typeof draw === 'function') draw();
+          return false;
+        }
+        this._graphEdgeDragOrigin = target;
+        return origMouseDown.call(canvas, e);
+      }
+      return origMouseDown.call(canvas, e);
+    };
+
+    // Double-click on empty canvas already creates a brand-new,
+    // blank Node — genuinely useful behavior as-is (see
+    // ondblclick's own logic), just needs graph mode's own follow-up:
+    // mark it as a local-only draft (not yet a real xolu entity,
+    // nothing to persist yet — see the "vode" invariant this whole
+    // design is built around: a REF can never point at something
+    // that doesn't exist yet, so this node can't participate in any
+    // edge until it's actually created) and colour it invalid, since
+    // a node with no entity type assigned cannot be persisted at all
+    // yet either.
+    const origDblClick = canvas.ondblclick;
+    canvas.ondblclick = (e) => {
+      const nodesBefore = window.nodes.length;
+      origDblClick.call(canvas, e);
+      if (this.mode === 'graph' && window.nodes.length > nodesBefore) {
+        const newNode = window.nodes[window.nodes.length - 1];
+        newNode._graphDraft = true;
+        const id = ensureNodeId(newNode);
+        nodeColors.set(id, seamStateColors.invalid);
+        if (typeof draw === 'function') draw();
+      }
+    };
+
+    // Right-click, away from a halo (the halo's own right-click is
+    // already handled above): in FSM mode, the engine's own
+    // "Transition Properties" dialog (guard/action/output) — genuinely
+    // fine there, that's what it's for. In graph mode the same
+    // gesture instead does whatever's appropriate for xolu's own
+    // relationship model: on a draft node, starts entity-type
+    // assignment; on an existing edge, offers to clear the
+    // relationship (the edge's own REF field set to null — see
+    // _clearGraphEdge's own doc comment). On an existing, real node
+    // there's not yet a graph-mode-appropriate menu to show (a real
+    // next step, not this turn's own work) — for now, do nothing
+    // rather than show the FSM-specific dialog, which was confirmed
+    // directly this session to have no meaning here at all: right-
+    // clicking a graph edge opened a form asking for values that
+    // don't correspond to anything in xolu's own relationship model.
+    const origContextMenu = canvas.oncontextmenu;
+    canvas.oncontextmenu = (e) => {
+      e.preventDefault();
+      if (this.mode !== 'graph') {
+        return origContextMenu.call(canvas, e);
+      }
+      const mouse = crossBrowserRelativeMousePos(e);
+      const target = selectObject(mouse.x, mouse.y);
+      if (target instanceof Node && target._graphDraft) {
+        this._assignEntityType(target);
+      } else if (target != null && !(target instanceof Node) && target._graphEdge) {
+        this._clearGraphEdge(target);
+      }
+      return false;
+    };
+
+    // Completes a graph-mode edge-creation drag started at the
+    // onmousedown wrap above. Graph mode never lets the engine's own
+    // default completion run (push a fake, local-only Link to
+    // links[]) — see _completeGraphEdgeDrag's own doc comment for the
+    // real, server-persisted alternative. A drag that ends as a
+    // TemporaryLink (released on empty space, not on any node) still
+    // falls through to the original handler unchanged, since its own
+    // snap-back animation already does exactly the right thing.
+    const origMouseUp = canvas.onmouseup;
+    canvas.onmouseup = (e) => {
+      const dragOrigin = this._graphEdgeDragOrigin;
+      this._graphEdgeDragOrigin = null;
+      if (this.mode === 'graph' && dragOrigin && currentLink instanceof Link) {
+        const dropTarget = currentLink.nodeB;
+        currentLink = null;
+        if (typeof draw === 'function') draw();
+        this._completeGraphEdgeDrag(dragOrigin, dropTarget);
+        return false;
+      }
+      return origMouseUp.call(canvas, e);
+    };
 
     // Wrap draw() — in fsm mode this also triggers debounced local
     // validation and a debounced layout save (the engine has no
@@ -275,6 +424,7 @@ class XoluFsmEditor extends LitElement {
 
     if (this.mode === 'graph') {
       zoomToFit();
+      await this._loadGraphEntityTypes();
     } else {
       await this._load(canvas);
     }
@@ -346,6 +496,35 @@ class XoluFsmEditor extends LitElement {
     }
   }
 
+  // Entering or exiting full screen changes the canvas-wrap's own
+  // size significantly (the existing ResizeObserver already resizes
+  // the canvas buffer to match — see _resize above), but never re-fits
+  // the view on its own, which is the right default for an ordinary
+  // window resize (preserve whatever the person was looking at) but
+  // the wrong one here: the whole point of full screen is to see more
+  // of the graph, not more empty canvas at the same zoom level.
+  // updateComplete + a frame wait ensures the CSS change (and the
+  // ResizeObserver firing from it) has actually happened before
+  // zoomToFit runs, not just that _maximized itself has flipped.
+  async _toggleMaximized() {
+    this._maximized = !this._maximized;
+    await this.updateComplete;
+    requestAnimationFrame(() => {
+      if (typeof zoomToFit === 'function') zoomToFit();
+    });
+  }
+
+  // _exportBaseUrl derives the export routes' own base
+  // ("/connections/{name}/fsm/{id}/export") from layoutUrl
+  // ("/connections/{name}/fsm/{id}/layout") — the same
+  // string-derivation convention this codebase already uses
+  // elsewhere (query-editor.js's own entitiesUrlFor, derived from
+  // runUrl) rather than a fourth server-passed attribute for what's
+  // already fully determined by the one that exists.
+  get _exportBaseUrl() {
+    return this.layoutUrl.replace(/\/layout$/, '/export');
+  }
+
   // _checkSelectionChange drives graph mode's click-to-inspect panel.
   // The engine has no "selection changed" event — this runs on every
   // draw() (see firstUpdated's own wrapping), comparing against the
@@ -354,6 +533,17 @@ class XoluFsmEditor extends LitElement {
   // not on every single redraw.
   _checkSelectionChange() {
     if (this.mode !== 'graph') return;
+    // The halo-click drag (onmousedown wrap) sets selectedObject to
+    // the drag's own origin node as a side effect of how the engine's
+    // own halo-click logic works, not because anything was actually
+    // clicked-to-select. Reacting to that here would open the inspect
+    // panel mid-drag, resizing the canvas (confirmed directly: ~130px
+    // shorter once the panel appears) and pulling the still-held
+    // mouse position outside the new, smaller bounds — which fires a
+    // spurious mouseleave that snaps the drag back before it can ever
+    // complete. Suppressed for the drag's own duration; the panel
+    // reacts normally to a real click again once it ends.
+    if (this._graphEdgeDragOrigin) return;
     const sel = typeof selectedObject !== 'undefined' ? selectedObject : null;
     if (sel === this._lastSelectedObject) return;
     this._lastSelectedObject = sel;
@@ -361,8 +551,20 @@ class XoluFsmEditor extends LitElement {
     this._inspectSaving = false;
     if (!sel) {
       this._inspecting = null;
+    } else if (sel._graphNode && sel._graphNode.collapsed) {
+      // A collapsed node's own data is just {id} -- nothing worth
+      // showing as editable fields. A distinct kind so render() shows
+      // an explicit "Expand" action instead of the normal edit form.
+      this._inspecting = { kind: 'collapsed-node', type: sel._graphNode.type, label: sel.text, data: sel._graphNode.data };
+      this._inspectEdits = {};
     } else if (sel._graphNode) {
-      this._inspecting = { kind: 'node', label: sel.text, data: sel._graphNode.data };
+      // type stored separately from data — data is the entity's own
+      // domain document (no "type" field of its own in general; the
+      // real, confirmed bug this replaced sent {id, changes} with no
+      // type at all, which the server correctly rejects with "type
+      // and a positive id are required", found by testing the actual
+      // save flow end to end, not assumed from reading the code).
+      this._inspecting = { kind: 'node', type: sel._graphNode.type, label: sel.text, data: sel._graphNode.data };
       // A fresh copy of the editable fields' current values -- kept
       // separate from the node's own real data so typing into the
       // form doesn't mutate anything until Save actually succeeds.
@@ -395,7 +597,7 @@ class XoluFsmEditor extends LitElement {
       const resp = await fetch(this.graphUrl + '/node', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: original.type, id: original.id, changes }),
+        body: JSON.stringify({ type: this._inspecting.type, id: original.id, changes }),
       });
       if (!resp.ok) {
         this._inspectError = await resp.text();
@@ -406,7 +608,7 @@ class XoluFsmEditor extends LitElement {
       // own data and label locally rather than re-running the whole
       // query, which would also reset pan/zoom/layout for no reason.
       Object.assign(original, changes);
-      node.text = this._labelForNode({ type: original.type, data: original });
+      node.text = this._labelForNode({ type: this._inspecting.type, data: original });
       this._inspecting = { ...this._inspecting, label: node.text, data: original };
       if (typeof draw === 'function') draw();
     } catch (e) {
@@ -447,6 +649,367 @@ class XoluFsmEditor extends LitElement {
     }
   }
 
+  // _clearGraphEdge is the right-click-on-an-edge answer for graph
+  // mode — replaces the FSM-specific "Transition Properties" dialog
+  // (guard/action/output — confirmed directly this session to have no
+  // meaning against xolu's own relationship model, since a REF is a
+  // plain field value, not a first-class object with its own
+  // properties). The one meaningful edge-level operation this model
+  // actually supports beyond retargeting (already in the left-click
+  // inspect panel) is clearing the relationship entirely — setting
+  // the REF field back to empty, confirmed directly against a real
+  // xolu instance to genuinely remove the field, not just store a
+  // literal null (SaveGraphEdge's own doc comment has the details).
+  // A plain confirm() rather than a full dialog: this is a single,
+  // named, destructive yes/no action, not a form.
+  async _clearGraphEdge(target) {
+    const edge = target._graphEdge;
+    if (!edge) return;
+    const confirmed = await showFSMDialog({
+      title: `Clear "${edge.rel}"?`,
+      fields: [],
+      saveLabel: 'Clear relationship',
+    });
+    if (confirmed === null) return; // cancelled
+
+    try {
+      const resp = await fetch(this.graphUrl + '/edge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: edge.from, relField: edge.rel, newTo: '' }),
+      });
+      if (!resp.ok) return; // best-effort for a first version -- the edge stays as-is, no error surfaced yet
+      // Same reasoning as _saveInspectedEdge's own retarget case:
+      // clearing genuinely changes the graph's own structure, so a
+      // full re-query is the honest way to reflect it.
+      await this._runGraphQuery();
+    } catch (e) {
+      // best-effort
+    }
+  }
+
+  // _completeGraphEdgeDrag is the real, server-persisted alternative
+  // to the engine's own default drag-completion (push a fake, local-
+  // only Link to links[] — meaningless here, since a graph edge is a
+  // REF field on a real xolu entity, not an arbitrary drawable line).
+  // Applies this session's own agreed rule: for a schema-ful origin
+  // (RefFieldsForType's own hasSchema), only an empty field whose
+  // known target matches the drop's own entity type is valid — the
+  // first such field, if more than one qualifies (this session's own
+  // agreed disambiguation). For a genuinely schema-less origin, any
+  // on-canvas target is valid regardless of type, but the field name
+  // isn't predetermined by anything, so it's asked for directly.
+  // Silently rejects (no dialog, no error) when the origin has no
+  // valid field for this particular drop — the drag simply produces
+  // nothing, which reads as "that connection isn't possible" without
+  // needing to explain the schema's own constraints in a popup.
+  async _completeGraphEdgeDrag(origin, target) {
+    if (!origin._graphNode || !target._graphNode || target._graphNode.collapsed) return;
+    const originType = origin._graphNode.type;
+    const originData = origin._graphNode.data;
+    const targetType = target._graphNode.type;
+
+    let refFieldsResult;
+    try {
+      const resp = await fetch(`${this.graphUrl}/ref-fields/${encodeURIComponent(originType)}`);
+      refFieldsResult = await resp.json();
+    } catch (e) {
+      return;
+    }
+
+    let relField;
+    if (refFieldsResult.hasSchema) {
+      const candidate = (refFieldsResult.fields || []).find((f) =>
+        f.target === targetType && (originData[f.name] === undefined || originData[f.name] === null)
+      );
+      if (!candidate) return; // no empty, type-matching field on this origin -- nothing valid to drop here
+      relField = candidate.name;
+    } else {
+      const result = await showFSMDialog({
+        title: `New relationship on ${originType}#${originData.id}`,
+        fields: [{ key: 'fieldName', label: 'Field name', value: '', placeholder: 'e.g. related_to' }],
+        saveLabel: 'Create relationship',
+      });
+      if (!result || !result.fieldName) return; // cancelled
+      relField = result.fieldName;
+    }
+
+    try {
+      const resp = await fetch(this.graphUrl + '/edge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: origin._graphNode.id, relField, newTo: target._graphNode.id }),
+      });
+      if (!resp.ok) return;
+      await this._runGraphQuery();
+    } catch (e) {
+      // best-effort
+    }
+  }
+
+  // _expandCollapsedNode is the inspect panel's own "Expand" button
+  // handler -- thin wrapper over _expandNode using whatever's
+  // currently selected, since the button only ever appears once a
+  // collapsed node has already been clicked once. See _expandNode's
+  // own doc comment for the actual logic.
+  async _expandCollapsedNode() {
+    if (!this._inspecting || this._inspecting.kind !== 'collapsed-node') return;
+    await this._expandNode(this._lastSelectedObject);
+  }
+
+  // _expandNode fetches a node's real data plus one hop of its own
+  // REFs (see graphrest.go's Expand and its own doc comment), then
+  // merges the result into the current canvas -- deliberately not a
+  // full re-query, which would reset pan/zoom/layout and everyone's
+  // existing position for no reason. Every node already present (by
+  // its own "type:id" identity, not object identity) is left alone
+  // unless it was itself only a collapsed stub, in which case it's
+  // upgraded in place rather than duplicated; every edge already
+  // present (by from/rel/to) is left alone too. New nodes are placed
+  // in a small ring around the node that was expanded -- a reasonable
+  // default position for something that had no layout of its own
+  // before this moment, not an attempt at a globally consistent
+  // layout. Called both from the inspect panel's own "Expand" button
+  // (via _expandCollapsedNode) and directly from a right-click-halo
+  // gesture (_checkHaloGraphAction), which doesn't require a node to
+  // already be selected/inspecting first.
+  async _expandNode(origin) {
+    if (!origin || !origin._graphNode) return;
+    const { type, id } = origin._graphNode;
+
+    this._inspectSaving = true;
+    this._inspectError = null;
+    try {
+      const resp = await fetch(this.graphUrl + '/expand', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, id: origin._graphNode.data.id, depth: 1 }),
+      });
+      const text = await resp.text();
+      if (!resp.ok) {
+        this._inspectError = text || `HTTP ${resp.status}`;
+        this._inspectSaving = false;
+        return;
+      }
+      const result = JSON.parse(text);
+      this._mergeGraphData(result, origin);
+
+      // The just-expanded node itself is always the first thing
+      // walked server-side, so it's always present in result.nodes --
+      // show its real data in the inspect panel now, rather than
+      // leaving the "Expand" button showing for a node that no longer
+      // needs it. Only touches the panel if this node is the one
+      // currently selected -- a halo-triggered expand of some other,
+      // unselected node shouldn't hijack whatever's currently shown.
+      const expanded = (result.nodes || []).find((n) => n.id === id);
+      if (expanded && this._lastSelectedObject === origin) {
+        this._inspecting = { kind: 'node', type: expanded.type, label: origin.text, data: expanded.data };
+        this._inspectEdits = {};
+        for (const [k, v] of Object.entries(expanded.data)) {
+          if (!isNodeSystemField(k) && !isRefValue(v)) this._inspectEdits[k] = v;
+        }
+      }
+    } catch (e) {
+      this._inspectError = String(e);
+    }
+    this._inspectSaving = false;
+  }
+
+  // _collapseNode is expand's own inverse — purely client-side, no
+  // server call needed, since collapsing only hides data already on
+  // the canvas rather than fetching anything new. Removes every
+  // outgoing edge from this node (the ones expand itself would have
+  // introduced), then removes any node left with no remaining edges
+  // touching it at all -- a node someone else still points to, or
+  // that still points somewhere else via a different edge, stays
+  // (something else on the canvas still needs it visible). The node
+  // itself is never removed, only turned back into a collapsed stub.
+  _collapseNode(target) {
+    if (!target || !target._graphNode || target._graphNode.collapsed) return;
+    const targetID = target._graphNode.id;
+
+    const removed = window.links.filter((l) => l._graphEdge && l._graphEdge.from === targetID);
+    const removedSet = new Set(removed);
+    window.links = window.links.filter((l) => !removedSet.has(l));
+
+    const candidateTargets = new Set(removed.map((l) => l.nodeB));
+    window.nodes = window.nodes.filter((n) => {
+      if (!candidateTargets.has(n)) return true;
+      const stillTouched = window.links.some((l) => l.nodeA === n || l.nodeB === n || (l.node === n));
+      return stillTouched;
+    });
+
+    target._graphNode = { id: targetID, type: target._graphNode.type, collapsed: true, data: { id: target._graphNode.data.id } };
+    target.isAcceptState = true;
+    target.text = this._labelForNode(target._graphNode);
+
+    if (this._lastSelectedObject === target) {
+      this._inspecting = { kind: 'collapsed-node', type: target._graphNode.type, label: target.text, data: target._graphNode.data };
+      this._inspectEdits = {};
+    }
+    if (typeof draw === 'function') draw();
+  }
+
+  // _assignEntityType is the full answer to right-clicking a draft
+  // node (a blank, local-only Node from double-click on empty canvas
+  // — see the ondblclick wrap in firstUpdated): pick a real entity
+  // type, fill in and submit the real form for it, and on success
+  // turn the local draft into a genuinely persisted xolu entity.
+  //
+  // Deliberately three separate steps, not one combined form:
+  //   1. showFSMDialog with a select field — the entity type itself,
+  //      picked from real, known-to-exist types (this._graphEntity-
+  //      TypeOptions, already loaded on mount for the toolbar's own
+  //      picker), not free text a person could mistype.
+  //   2. Once a type is chosen, fetch the real, unmodified NewForm
+  //      fragment for it (the same form the main entity list already
+  //      uses, via the same HX-Request mechanism WriteModalAware
+  //      already understands — no duplicate field-rendering logic
+  //      anywhere) and show it in showHTMLDialog.
+  //   3. On submit, POST the form's own field values to
+  //      CreateGraphNode (not to the form's own action, which points
+  //      at entities.go's Create and would redirect rather than
+  //      return the new ID this needs) — see that handler's own doc
+  //      comment for why it's a separate endpoint from Create at all.
+  //
+  // A node cannot be persisted with no type at all (structurally --
+  // xolu's own REST routes have no create endpoint without an entity
+  // type in the path), so this is the mandatory first step, not an
+  // optional enhancement -- the node stays a red, invalid draft on
+  // the canvas until it's been through this flow successfully.
+  async _assignEntityType(node) {
+    const typeResult = await showFSMDialog({
+      title: 'Assign entity type',
+      fields: [{
+        key: 'entityType', label: 'Entity type', type: 'select',
+        options: this._graphEntityTypeOptions, value: this._graphEntityTypeOptions[0] || '',
+      }],
+    });
+    if (!typeResult || !typeResult.entityType) return; // cancelled -- node stays a draft
+    const entityType = typeResult.entityType;
+
+    let formHTML;
+    try {
+      const formResp = await fetch(`${this.entitiesBaseUrl}/${encodeURIComponent(entityType)}/new`, {
+        headers: { 'HX-Request': 'true' },
+      });
+      formHTML = await formResp.text();
+    } catch (e) {
+      return; // best-effort -- node stays a draft, person can try again via the same right-click
+    }
+    if (!formHTML.includes('<form')) {
+      // The known limitation this session found and named directly:
+      // resolveEntityFields (shared with the main entity form) can't
+      // build a form for a type with no schema and no existing rows
+      // to infer fields from at all. Not reachable in practice here
+      // since the type picker only ever offers types GraphEntityTypes
+      // already knows have real data -- kept as a defensive check,
+      // not expected to fire.
+      return;
+    }
+
+    const formEl = await showHTMLDialog({ title: `New ${entityType}`, html: formHTML, saveLabel: 'Create' });
+    if (!formEl) return; // cancelled -- node stays a draft
+
+    const body = new URLSearchParams(new FormData(formEl));
+    let resp;
+    try {
+      resp = await fetch(`${this.graphUrl}/create/${encodeURIComponent(entityType)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+    } catch (e) {
+      return; // best-effort -- node stays a draft
+    }
+    const result = await resp.json().catch(() => ({}));
+    if (!resp.ok || !result.id) {
+      // Best-effort for a first version -- the error itself isn't
+      // shown anywhere yet (a real refinement, not this turn's own
+      // scope); the node simply stays a draft, and right-clicking it
+      // again starts the whole flow over.
+      return;
+    }
+
+    // Success: fetch the real, server-computed document (correctly
+    // structured REF fields, computed defaults, everything) rather
+    // than approximating it from the raw strings just submitted --
+    // reuses the existing Expand endpoint at depth 0, since that's
+    // already exactly "fetch one real entity's own real data."
+    const graphID = `${entityType}:${result.id}`;
+    let realData = { id: result.id };
+    try {
+      const expandResp = await fetch(`${this.graphUrl}/expand`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: entityType, id: result.id, depth: 0 }),
+      });
+      const expandResult = await expandResp.json();
+      const found = (expandResult.nodes || []).find((n) => n.id === graphID);
+      if (found) realData = found.data;
+    } catch (e) {
+      // Best-effort -- the node still becomes real below, just with
+      // minimal data until the next full query refreshes it.
+    }
+
+    node._graphNode = { id: graphID, type: entityType, data: realData };
+    node._graphDraft = false;
+    node.text = this._labelForNode(node._graphNode);
+    nodeColors.delete(ensureNodeId(node));
+    if (typeof draw === 'function') draw();
+  }
+
+
+  // live canvas engine's own global nodes[]/links[] arrays, in place --
+  // see _expandCollapsedNode's own doc comment for why this isn't a
+  // full re-query.
+  _mergeGraphData(result, origin) {
+    const byGraphId = {};
+    window.nodes.forEach((n) => { if (n._graphNode) byGraphId[n._graphNode.id] = n; });
+
+    const newNodes = (result.nodes || []);
+    const placedCount = newNodes.length;
+    newNodes.forEach((gn, i) => {
+      const existing = byGraphId[gn.id];
+      if (existing) {
+        if (existing._graphNode.collapsed && !gn.collapsed) {
+          // Upgrade in place: same node, real data has arrived.
+          existing._graphNode = gn;
+          existing.isAcceptState = false;
+          existing.text = this._labelForNode(gn);
+        }
+        // Already present and already full -- nothing to do, and
+        // definitely not a duplicate node for the same real entity.
+        return;
+      }
+      const angle = (2 * Math.PI * i) / Math.max(placedCount, 1);
+      const radius = 90;
+      const node = new Node(origin.x + radius * Math.cos(angle), origin.y + radius * Math.sin(angle));
+      node.text = this._labelForNode(gn);
+      node.isAcceptState = !!gn.collapsed;
+      node._graphNode = gn;
+      window.nodes.push(node);
+      byGraphId[gn.id] = node;
+    });
+
+    const existingEdgeKeys = new Set(
+      window.links.filter((l) => l._graphEdge).map((l) => `${l._graphEdge.from}|${l._graphEdge.rel}|${l._graphEdge.to}`)
+    );
+    (result.edges || []).forEach((ge) => {
+      const key = `${ge.from}|${ge.rel}|${ge.to}`;
+      if (existingEdgeKeys.has(key)) return;
+      const a = byGraphId[ge.from], b = byGraphId[ge.to];
+      if (!a || !b) return; // both endpoints are always placed above first, but stay defensive
+      const link = new Link(a, b);
+      link.text = ge.rel;
+      link._graphEdge = ge;
+      window.links.push(link);
+      existingEdgeKeys.add(key);
+    });
+
+    if (typeof draw === 'function') draw();
+  }
+
   // _labelForNode picks a reasonable display field from a node's own
   // data rather than showing "companies:6" on the canvas — the first
   // of a short list of common name-shaped fields, falling back to
@@ -461,8 +1024,23 @@ class XoluFsmEditor extends LitElement {
     return `${node.type}#${d.id ?? ''}`;
   }
 
+  async _loadGraphEntityTypes() {
+    if (!this.graphEntityTypesUrl) return;
+    try {
+      const resp = await fetch(this.graphEntityTypesUrl);
+      if (!resp.ok) return; // best-effort -- the picker just stays empty, not a page-level error
+      this._graphEntityTypeOptions = await resp.json();
+      if (!this._graphEntityType && this._graphEntityTypeOptions.length > 0) {
+        this._graphEntityType = this._graphEntityTypeOptions[0];
+      }
+    } catch (e) {
+      // Same best-effort reasoning -- an empty picker is a fine
+      // degradation, not worth surfacing as this._error.
+    }
+  }
+
   async _runGraphQuery() {
-    if (!this._graphQuery.trim() || typeof clearCanvas !== 'function') return;
+    if (!this._graphEntityType || typeof clearCanvas !== 'function') return;
     this._graphLoading = true;
     this._error = null;
     this._inspecting = null;
@@ -471,7 +1049,7 @@ class XoluFsmEditor extends LitElement {
       const resp = await fetch(this.graphUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: this._graphQuery }),
+        body: JSON.stringify({ entityType: this._graphEntityType, depth: this._graphDepth }),
       });
       const text = await resp.text();
       if (!resp.ok) {
@@ -497,6 +1075,21 @@ class XoluFsmEditor extends LitElement {
   // layout, same reasoning as fsm mode's own fallback for a machine
   // with no saved layout — this is a fresh visualization each query
   // run, not something with a persisted layout to load.
+  // applyExternalGraphData is this component's own public entry point
+  // for graph data that originated somewhere other than this
+  // component's own query flow — specifically, the Sulpher tab living
+  // beside the graph-walker tab on the same page (query.go's own
+  // GraphView), whose own "View in graph" button dispatches an
+  // xolu-view-in-graph event the page itself listens for and forwards
+  // here. No different from any other graph render internally — same
+  // _applyGraphData, same {nodes, edges} shape (Go's own
+  // classifySulpherResult already produces exactly this contract) —
+  // named and exposed without the underscore specifically to mark it
+  // as the one method meant to be called from outside this component.
+  applyExternalGraphData(data) {
+    this._applyGraphData(data);
+  }
+
   _applyGraphData(data) {
     const nodes = data.nodes || [];
     const edges = data.edges || [];
@@ -510,7 +1103,7 @@ class XoluFsmEditor extends LitElement {
         const angle = (2 * Math.PI * i) / Math.max(nodes.length, 1) - Math.PI / 2;
         return {
           x: Math.round(cx + r * Math.cos(angle)), y: Math.round(cy + r * Math.sin(angle)),
-          text: this._labelForNode(n), isAcceptState: false, textOnly: false,
+          text: this._labelForNode(n), isAcceptState: !!n.collapsed, textOnly: false,
         };
       }),
       links: edges
@@ -632,9 +1225,14 @@ class XoluFsmEditor extends LitElement {
     const btnStyle = `display:inline-flex;align-items:center;gap:4px;padding:5px 12px;font-size:13px;font-weight:500;border-radius:6px;border:1px solid ${inputBorder};background:${toolbarBg};color:${textCol};cursor:pointer`;
     const isGraph = this.mode === 'graph';
 
+    const pageBg = dark ? '#0f172a' : '#ffffff';
+    const maximizedStyle = this._maximized
+      ? `position:fixed; inset:0; z-index:60; height:100vh; width:100vw; background:${pageBg}; padding:0.75rem; box-sizing:border-box;`
+      : `height:640px; width:100%;`;
+
     return html`
       <style>
-        xolu-fsm-editor { display:flex; flex-direction:column; height:640px; width:100%; }
+        xolu-fsm-editor { display:flex; flex-direction:column; ${maximizedStyle} }
         .fsm-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:0.75rem; }
         .fsm-fields { display:flex; gap:0.75rem; flex-wrap:wrap; padding:0.5rem 0 0.75rem; }
         .fsm-fields input, .fsm-fields select {
@@ -642,11 +1240,14 @@ class XoluFsmEditor extends LitElement {
           background:#fff; color:#111827;
         }
         .dark .fsm-fields input, .dark .fsm-fields select { border-color:#374151; background:#1f2937; color:#f3f4f6; }
-        .fsm-graph-query { flex:1; min-width:20rem; font-family:monospace; }
         .fsm-toolbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid ${border}; background:${toolbarBg}; }
         .fsm-hint { flex:1; font-size:12px; color:${dark ? '#64748b' : '#94a3b8'}; }
         .fsm-canvas-wrap { flex:1; overflow:hidden; position:relative; border:1px solid ${border}; border-radius:0 0 0.5rem 0.5rem; }
         #fsm-canvas { display:block; width:100%; height:100%; cursor:crosshair; }
+        .fsm-graph-body { display:flex; flex-direction:row; flex:1; overflow:hidden; gap:0.75rem; }
+        .fsm-graph-body .fsm-canvas-wrap { border-radius:0 0 0 0.5rem; }
+        .fsm-graph-sidebar { width:320px; flex-shrink:0; overflow-y:auto; }
+        .fsm-graph-sidebar .fsm-panel { margin-top:0; }
         .fsm-panel { margin-top:0.75rem; padding:0.6rem 0.9rem; border-radius:0.5rem; font-size:0.8125rem; }
         .fsm-panel-error { background:#fef2f2; border:1px solid #fecaca; color:#991b1b; }
         .dark .fsm-panel-error { background:rgba(127,29,29,0.3); border-color:rgba(248,113,113,0.3); color:#fca5a5; }
@@ -691,11 +1292,21 @@ class XoluFsmEditor extends LitElement {
       ${isGraph
         ? html`
             <div class="fsm-fields">
-              <input type="text" class="fsm-graph-query" placeholder="MATCH (a)-[r]->(b) RETURN a, r, b"
-                .value=${this._graphQuery}
-                @input=${(e) => (this._graphQuery = e.target.value)}
-                @keydown=${(e) => e.key === 'Enter' && this._runGraphQuery()} />
-              <button class="${btnStyle}" style="background:#4f46e5;color:#fff;border-color:#4f46e5" ?disabled=${this._graphLoading} @click=${this._runGraphQuery}>
+              <select class="fsm-graph-entity-type"
+                .value=${this._graphEntityType}
+                @change=${(e) => (this._graphEntityType = e.target.value)}>
+                ${this._graphEntityTypeOptions.length === 0
+                  ? html`<option value="">No entity types available</option>`
+                  : this._graphEntityTypeOptions.map((t) => html`<option value=${t}>${t}</option>`)}
+              </select>
+              <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.875rem;color:#6b7280">
+                Depth
+                <input type="number" class="fsm-graph-depth" min="0" max="4" style="width:4rem"
+                  .value=${String(this._graphDepth)}
+                  @input=${(e) => (this._graphDepth = parseInt(e.target.value, 10) || 0)} />
+              </label>
+              <button class="${btnStyle}" style="background:#4f46e5;color:#fff;border-color:#4f46e5"
+                ?disabled=${this._graphLoading || !this._graphEntityType} @click=${this._runGraphQuery}>
                 ${this._graphLoading ? 'Running…' : 'Run'}
               </button>
             </div>
@@ -729,13 +1340,37 @@ class XoluFsmEditor extends LitElement {
         <button class="${btnStyle}" @click=${() => typeof zoomBy === 'function' && zoomBy(1 / 1.25)}>−</button>
         <button class="${btnStyle}" @click=${() => typeof zoomToFit === 'function' && zoomToFit()} title="Fit to screen">⤢</button>
         <button class="${btnStyle}" @click=${() => typeof zoomBy === 'function' && zoomBy(1.25)}>+</button>
+        <button class="${btnStyle}" @click=${this._toggleMaximized}
+          title=${this._maximized ? 'Exit full screen' : 'Full screen'}>
+          ${this._maximized ? '⛶ Exit' : '⛶'}
+        </button>
+        ${!isGraph && this.idValue
+          ? html`
+              <a class="${btnStyle}" style="text-decoration:none;display:inline-flex;align-items:center"
+                href="${this._exportBaseUrl}/svg" title="Export as SVG">SVG</a>
+              <a class="${btnStyle}" style="text-decoration:none;display:inline-flex;align-items:center"
+                href="${this._exportBaseUrl}/png" title="Export as PNG">PNG</a>
+              <a class="${btnStyle}" style="text-decoration:none;display:inline-flex;align-items:center"
+                href="${this._exportBaseUrl}/latex" title="Export as LaTeX/TikZ — uses the saved layout; save one first if this fails">TeX</a>
+            `
+          : ''}
       </div>
 
-      <div class="fsm-canvas-wrap">
-        <canvas id="fsm-canvas"></canvas>
-      </div>
-
-      ${isGraph ? this._renderInspectPanel() : this._renderValidationPanel()}
+      ${isGraph
+        ? html`
+            <div class="fsm-graph-body">
+              <div class="fsm-canvas-wrap">
+                <canvas id="fsm-canvas"></canvas>
+              </div>
+              <div class="fsm-graph-sidebar">${this._renderInspectPanel()}</div>
+            </div>
+          `
+        : html`
+            <div class="fsm-canvas-wrap">
+              <canvas id="fsm-canvas"></canvas>
+            </div>
+            ${this._renderValidationPanel()}
+          `}
     `;
   }
 
@@ -770,20 +1405,33 @@ class XoluFsmEditor extends LitElement {
     }
     const { kind, label, data } = this._inspecting;
     const btnStyle = `display:inline-flex;align-items:center;gap:4px;padding:4px 10px;font-size:12px;font-weight:500;border-radius:6px;border:1px solid #4f46e5;background:#4f46e5;color:#fff;cursor:pointer`;
+    const titleForKind = { node: 'Node', edge: 'Edge', 'collapsed-node': 'Collapsed node' };
 
     return html`
       <div class="fsm-panel fsm-inspect">
-        <div class="fsm-inspect-title">${kind === 'node' ? 'Node' : 'Edge'}: ${label}</div>
+        <div class="fsm-inspect-title">${titleForKind[kind]}: ${label}</div>
 
-        ${kind === 'node' ? this._renderNodeForm(data) : this._renderEdgeForm(data)}
+        ${kind === 'collapsed-node'
+          ? html`
+              <div class="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                Its own REF fields haven't been fetched yet.
+              </div>
+              ${this._inspectError ? html`<div class="fsm-inspect-error">${this._inspectError}</div>` : ''}
+              <button class="${btnStyle}" ?disabled=${this._inspectSaving} @click=${this._expandCollapsedNode}>
+                ${this._inspectSaving ? 'Expanding…' : 'Expand'}
+              </button>
+            `
+          : html`
+              ${kind === 'node' ? this._renderNodeForm(data) : this._renderEdgeForm(data)}
 
-        ${this._inspectError ? html`<div class="fsm-inspect-error">${this._inspectError}</div>` : ''}
+              ${this._inspectError ? html`<div class="fsm-inspect-error">${this._inspectError}</div>` : ''}
 
-        <button class="${btnStyle}" style="margin-top:8px"
-          ?disabled=${this._inspectSaving}
-          @click=${() => (kind === 'node' ? this._saveInspectedNode() : this._saveInspectedEdge())}>
-          ${this._inspectSaving ? 'Saving…' : 'Save'}
-        </button>
+              <button class="${btnStyle}" style="margin-top:8px"
+                ?disabled=${this._inspectSaving}
+                @click=${() => (kind === 'node' ? this._saveInspectedNode() : this._saveInspectedEdge())}>
+                ${this._inspectSaving ? 'Saving…' : 'Save'}
+              </button>
+            `}
       </div>
     `;
   }
